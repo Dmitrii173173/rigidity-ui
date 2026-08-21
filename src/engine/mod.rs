@@ -1,17 +1,16 @@
 //! The worker thread.
 //!
-//! M1 asks one thing of it: reading a file must not happen on the frame
-//! loop. A million-point PLY takes long enough that a synchronous read
-//! would drop frames on the first file anyone opens, which principle §1
-//! forbids. M2 grows this into the full job queue — prepare, register,
-//! analyse, cancel — and the shape here is chosen to be grown rather than
-//! replaced.
+//! Everything that calls into `rigidity` happens here, off the frame loop.
+//! Principle §1 is not a preference: preparing a million points takes long
+//! enough that doing it inline would drop every frame of the wait, and the
+//! one thing a diagnostic must never do is stop responding while it thinks.
 //!
 //! Nothing in this module may import `egui` for anything but the repaint
 //! signal, and nothing may import `wgpu` at all.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Instant;
@@ -19,59 +18,46 @@ use std::time::Instant;
 use rigidity_core::PointCloud;
 use rigidity_pipeline::PipelineError;
 
-/// Work for the engine.
-pub(crate) enum Job {
-    /// Read a point cloud from disk.
-    Load(PathBuf),
-}
+pub(crate) mod job;
+pub(crate) mod session;
 
-/// What the engine reports back.
-pub(crate) enum Event {
-    /// A file was opened and is being read.
-    Started(PathBuf),
-    /// A cloud arrived.
-    Loaded {
-        /// Where it came from.
-        path: PathBuf,
-        /// The points, shared rather than copied — the renderer takes a
-        /// handle to the same allocation.
-        cloud: Arc<PointCloud>,
-        /// The bounding box, in the local coordinates the GPU sees.
-        ///
-        /// Computed here rather than by the caller because it is a pass
-        /// over every point, and the frame loop is the one place that
-        /// cannot afford one.
-        bounds: Option<([f32; 3], [f32; 3])>,
-        /// How long the read took.
-        seconds: f64,
-    },
-    /// It did not arrive.
-    Failed(PipelineError),
-}
+pub(crate) use job::{Event, Job};
+use session::Session;
 
 /// A handle to the worker thread.
 pub(crate) struct Engine {
     jobs: Sender<Job>,
     events: Receiver<Event>,
+    /// The request the application still wants an answer to.
+    ///
+    /// Shared with the worker, which abandons anything else. One counter
+    /// serves both cancellation and supersession, because to the worker
+    /// they are the same fact: nobody is waiting.
+    wanted: Arc<AtomicU64>,
+    /// The last identifier handed out.
+    issued: u64,
 }
 
 impl Engine {
     /// Starts the thread.
     ///
     /// The context is cloned in so that the worker can ask for a repaint
-    /// when it has something to show. Without it the application would
-    /// sit still until the user moved the mouse.
+    /// when it has something to show. Without it the application would sit
+    /// still until the user moved the mouse.
     pub(crate) fn spawn(ctx: eframe::egui::Context) -> Self {
         let (job_sender, job_receiver) = channel::<Job>();
         let (event_sender, event_receiver) = channel::<Event>();
+        let wanted = Arc::new(AtomicU64::new(0));
+        let worker_wanted = Arc::clone(&wanted);
 
         thread::Builder::new()
             .name("rigidity-engine".to_owned())
             .spawn(move || {
+                let mut session = Session::default();
                 // Ends when the sender is dropped, which happens when the
                 // application does.
                 for job in job_receiver {
-                    run(job, &event_sender, &ctx);
+                    run(job, &mut session, &worker_wanted, &event_sender, &ctx);
                 }
             })
             .expect("the engine thread could not be started");
@@ -79,22 +65,60 @@ impl Engine {
         Self {
             jobs: job_sender,
             events: event_receiver,
+            wanted,
+            issued: 0,
         }
     }
 
-    /// Queues work. Dropping the result is deliberate: a dead engine means
-    /// the application is closing, and there is nobody left to tell.
-    pub(crate) fn send(&self, job: Job) {
-        let _ = self.jobs.send(job);
+    /// Queues a file to read.
+    pub(crate) fn load(&self, path: PathBuf) {
+        self.send(Job::Load(path));
+    }
+
+    /// Queues an analysis, superseding any earlier one.
+    ///
+    /// Returns the identifier: events carry it, and the application ignores
+    /// answers to questions it has stopped asking.
+    pub(crate) fn analyse(
+        &mut self,
+        cloud: Arc<PointCloud>,
+        params: rigidity_pipeline::PrepareParams,
+    ) -> u64 {
+        self.issued += 1;
+        self.wanted.store(self.issued, Ordering::Relaxed);
+        self.send(Job::Analyse {
+            id: self.issued,
+            cloud,
+            params,
+        });
+        self.issued
+    }
+
+    /// Abandons whatever is in flight.
+    pub(crate) fn cancel(&mut self) {
+        self.issued += 1;
+        self.wanted.store(self.issued, Ordering::Relaxed);
     }
 
     /// Everything reported since the last frame.
     pub(crate) fn poll(&self) -> impl Iterator<Item = Event> + '_ {
         self.events.try_iter()
     }
+
+    /// Dropping the result is deliberate: a dead engine means the
+    /// application is closing, and there is nobody left to tell.
+    fn send(&self, job: Job) {
+        let _ = self.jobs.send(job);
+    }
 }
 
-fn run(job: Job, events: &Sender<Event>, ctx: &eframe::egui::Context) {
+fn run(
+    job: Job,
+    session: &mut Session,
+    wanted: &AtomicU64,
+    events: &Sender<Event>,
+    ctx: &eframe::egui::Context,
+) {
     match job {
         Job::Load(path) => {
             emit(events, ctx, Event::Started(path.clone()));
@@ -107,6 +131,24 @@ fn run(job: Job, events: &Sender<Event>, ctx: &eframe::egui::Context) {
                     seconds: start.elapsed().as_secs_f64(),
                 },
                 Err(source) => Event::Failed(PipelineError::Read { path, source }),
+            };
+            emit(events, ctx, event);
+        }
+
+        Job::Analyse { id, cloud, params } => {
+            let start = Instant::now();
+            let stale = || wanted.load(Ordering::Relaxed) != id;
+            let mut progress = |progress| emit(events, ctx, Event::Working { id, progress });
+
+            let event = match session.analyse(&cloud, &params, &stale, &mut progress) {
+                Ok(Some((analysis, points))) => Event::Analysed {
+                    id,
+                    analysis: Box::new(analysis),
+                    points,
+                    seconds: start.elapsed().as_secs_f64(),
+                },
+                Ok(None) => Event::Abandoned { id },
+                Err(error) => Event::Failed(error),
             };
             emit(events, ctx, event);
         }

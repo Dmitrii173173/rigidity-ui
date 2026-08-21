@@ -35,6 +35,12 @@ rfd = "0.17"
 # same crate, and a matrix reaches a uniform through `as_slice()`, which is
 # already column-major and needs no bytemuck conversion at all.
 
+[dev-dependencies]
+# The parity test builds its own scene rather than reading a fixture: the
+# demo clouds in ../rigidity are gitignored, and a test that skips when its
+# input is missing is a test that passes for the wrong reason.
+rigidity-scenes = { path = "../rigidity/crates/rigidity-scenes" }
+
 [lints.rust]
 unsafe_code     = "forbid"
 unreachable_pub = "warn"

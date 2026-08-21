@@ -4,6 +4,7 @@ mod app;
 mod bench;
 mod engine;
 mod render;
+mod spectrum;
 mod theme;
 
 use std::path::PathBuf;

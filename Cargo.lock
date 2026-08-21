@@ -2931,6 +2931,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rigidity-scenes"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+ "rigidity-core",
+]
+
+[[package]]
 name = "rigidity-spatial"
 version = "0.1.0"
 dependencies = [
@@ -2950,6 +2958,7 @@ dependencies = [
  "rigidity-core",
  "rigidity-io",
  "rigidity-pipeline",
+ "rigidity-scenes",
 ]
 
 [[package]]
