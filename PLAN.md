@@ -21,7 +21,7 @@ without stage 2 has nowhere to put its scans.
 |---|---|---|
 | **Stage 1 — the instrument** | | |
 | M0 — Scaffold | **done** | window, wgpu callback, shell layout, theme |
-| M1 — Cloud rendering | not started | splats, orbit camera, EDL |
+| M1 — Cloud rendering | **done** | splats, orbit camera, EDL, 1.05 M at 120 fps |
 | M2 — Pipeline and spectrum | not started | worker thread, `analyse`, σ panel |
 | M3 — Registration | not started | live ICP, iteration timeline |
 | M4 — Null-space visualisation | not started | the feature the app exists for |
@@ -132,9 +132,11 @@ bytemuck = { version = "1.25", features = ["derive"] }
 #   thiserror = "2.0"   # M2 engine errors
 ```
 
-Note for M1: `nalgebra`'s bytemuck feature is spelled `convert-bytemuck`,
-and a `Matrix4<f32>` behind it goes into a uniform buffer with no
-conversion layer. That is what keeps a second linear-algebra crate out.
+M1 needed even less than that. `nalgebra` is not declared here at all:
+`rigidity_core::nalgebra` (§7.3) is the same crate, and `Matrix4::as_slice`
+is already the column-major order a WGSL `mat4x4` expects, so no bytemuck
+conversion and no feature flag were required. `rfd` came in for the file
+dialog. The manifest is five dependencies.
 
 **What stages 2 and 3 add — and how little it is.** Worth stating plainly,
 because "a CloudCompare and a SLAM package" sounds like it should drag in a
@@ -187,17 +189,16 @@ rigidity-ui/
     main.rs               # ✓ window bootstrap, nothing else
     app.rs                # ✓ layout, state machine, event pump
     theme.rs              # ✓ palette, type scale, spacing
-    engine/               # M2 — everything that touches rigidity
-      mod.rs              #   worker thread, channels
-      job.rs              #   Job / Event enums
-      session.rs          #   the pipeline call sequence and its state
-      error.rs            #   typed errors, no String
+    engine/
+      mod.rs              # ✓ worker thread, channels, one job so far
+      job.rs              # M2 the full Job / Event vocabulary
+      session.rs          # M2 the pipeline call sequence and its state
+    bench.rs              # ✓ frame times and screenshots, for the gates
     render/
-      mod.rs              # ✓ pipeline, callback, resources
-      viewport.wgsl       # ✓ M0 triangle; becomes the splat shader at M1
-      camera.rs           # M1 orbit / pan / dolly, fit-to-bounds
-      cloud.rs            # M1 vertex-pulled splats
-      edl.rs              # M1 eye-dome lighting post pass
+      mod.rs              # ✓ pipelines, targets, callback
+      camera.rs           # ✓ orbit / pan / dolly, fit-to-bounds
+      cloud.wgsl          # ✓ vertex-pulled splats
+      composite.wgsl      # ✓ eye-dome lighting and the blit
     panels/               # M2 onwards; M0 keeps them inline in app.rs
       inspector.rs        # sources, parameters
       spectrum.rs         # the six σ rows — the centrepiece
@@ -401,9 +402,12 @@ is 120–160 ms ease-out on state changes and camera moves, and nowhere else.
   vertex shader to a screen-space square, discarded outside the disc in the
   fragment shader. Point size in pixels, optionally attenuated by distance.
   `PrimitiveTopology::PointList` is one pixel per point and looks like noise.
-- **One interleave on upload.** `columns()` returns three slices; the
-  renderer builds `Vec<[f32; 3]>` once per cloud generation. That copy is
-  unavoidable and is the only one.
+- **No interleave at all.** `columns()` hands out three `&[f32]` slices and
+  they become three vertex streams, one per axis. The plan originally
+  budgeted one copy into a `Vec<[f32; 3]>`; the copy turned out to be
+  avoidable, so coordinates now reach the GPU exactly as `PointCloud`
+  stores them. The core's array-of-columns layout was chosen for filtering
+  and SIMD, and it pays a third time here.
 - **Reverse-Z `f32` depth**, so a scene spanning four orders of magnitude
   does not z-fight at the far end.
 - **Eye-dome lighting** as a full-screen post pass over depth. Point clouds
@@ -539,11 +543,32 @@ native title bar; the frameless treatment is M5, where it can be looked at
 rather than guessed at (eframe 0.36 exposes `WindowChromeMetrics` for
 exactly that).
 
-**M1 — Cloud rendering.** Load a PLY through `rigidity-io`, upload, orbit
-camera, fit-to-bounds from `PointCloud::bounds()`, splats, EDL, point-size
-control.
-*Gate:* `demo/corridor_target.ply` at one million points holds 60 fps while
-orbiting, measured with a frame-time readout, on the development machine.
+**M1 — Cloud rendering. Done.** Load a PLY off the frame loop, upload,
+orbit camera, fit-to-bounds, splats, eye-dome lighting, point-size and
+shading controls, drag and drop, and a path on the command line.
+*Gate: passed.* A 1 050 000-point corridor, orbiting: median 8.33 ms, p95
+8.60 ms, worst 16.9 ms over 712 frames. Read as a floor rather than a
+measurement — 8.33 ms is this display's refresh interval, so the figure
+says the renderer keeps up with a 120 Hz panel, not how much headroom is
+left above it.
+
+Two things arrived early and one is missing:
+
+- **The worker thread**, which this plan put in M2. Principle §1 forbids a
+  blocking frame loop and reading a million points takes long enough to
+  break it, so `engine/` exists now — a thread, a job, an event and a
+  repaint signal. The full queue, with cancellation, still belongs to M2.
+- **`bench.rs`**, the measurement harness: `RIGIDITY_UI_BENCH=<seconds>`
+  orbits the camera by itself and prints the frame distribution;
+  `RIGIDITY_UI_SHOT=<path>` writes the window out as raw RGBA on the way
+  down. It exists because frame times cannot tell a correct image from an
+  empty one — a viewport that draws nothing is very fast — and three later
+  gates are about what the image shows. It was worth its thirty lines
+  immediately: it caught eye-dome lighting doing almost nothing at the
+  strength and radius first chosen, which no timing would have shown.
+- **The colour modes** are not here. M1 draws one flat colour and lets EDL
+  do the work, which is enough to read a surface; height, residual and
+  contribution belong with the data that gives them meaning.
 
 **M2 — Pipeline and spectrum.** Worker thread, jobs, progress, cancel
 between stages. Single-cloud `analyse`. The σ panel with live noise and

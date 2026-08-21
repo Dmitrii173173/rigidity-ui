@@ -55,6 +55,12 @@ pub(crate) struct Palette {
     pub(crate) faint: Color32,
     /// The one accent. If a second one is ever needed, the layout is wrong.
     pub(crate) accent: Color32,
+    /// An unclassified point in the viewport.
+    ///
+    /// Not `text`: the viewport is the darker surface in one theme and the
+    /// lighter one in the other, and eye-dome lighting only darkens, so a
+    /// cloud has to start bright enough to have somewhere to go.
+    pub(crate) point: Color32,
     /// A degree of freedom the geometry determines well.
     pub(crate) high: Color32,
     /// One that is determined, but not to the required tolerance.
@@ -82,6 +88,7 @@ impl Palette {
                 muted: Color32::from_rgb(0x93, 0x9B, 0xA5),
                 faint: Color32::from_rgb(0x5A, 0x62, 0x6B),
                 accent: Color32::from_rgb(0x6A, 0xA9, 0xFF),
+                point: Color32::from_rgb(0xC8, 0xCD, 0xD4),
                 high: Color32::from_rgb(0x4F, 0xB8, 0xA8),
                 medium: Color32::from_rgb(0xE0, 0xB3, 0x41),
                 low: Color32::from_rgb(0xE5, 0x73, 0x4A),
@@ -95,6 +102,7 @@ impl Palette {
                 muted: Color32::from_rgb(0x5C, 0x63, 0x6C),
                 faint: Color32::from_rgb(0x93, 0x9B, 0xA5),
                 accent: Color32::from_rgb(0x2C, 0x6F, 0xE0),
+                point: Color32::from_rgb(0x3A, 0x41, 0x4A),
                 high: Color32::from_rgb(0x1E, 0x8F, 0x80),
                 medium: Color32::from_rgb(0xA9, 0x76, 0x1A),
                 low: Color32::from_rgb(0xC4, 0x50, 0x2A),

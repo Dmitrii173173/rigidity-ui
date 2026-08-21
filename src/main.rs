@@ -1,8 +1,12 @@
 //! Window bootstrap. Everything that draws lives in [`app`].
 
 mod app;
+mod bench;
+mod engine;
 mod render;
 mod theme;
+
+use std::path::PathBuf;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -15,9 +19,12 @@ fn main() -> eframe::Result {
         // therefore must not expect either.
         ..Default::default()
     };
+    // One optional argument: a file to open. Anything more belongs to the
+    // CLI, which is a different program with a different job.
+    let open = std::env::args().nth(1).map(PathBuf::from);
     eframe::run_native(
         "rigidity",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))),
     )
 }

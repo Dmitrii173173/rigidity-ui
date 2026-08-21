@@ -17,6 +17,7 @@ publish      = false
 # dependency is the only way in. Move to a git dependency as soon as the
 # repository has one; see PLAN.md §10.
 rigidity-core     = { path = "../rigidity/crates/rigidity-core" }
+rigidity-io       = { path = "../rigidity/crates/rigidity-io" }
 rigidity-pipeline = { path = "../rigidity/crates/rigidity-pipeline" }
 
 # One dependency for the whole UI and GPU stack: eframe re-exports the
@@ -26,6 +27,13 @@ eframe = "0.36"
 
 # Vertex and uniform structs go to the GPU as bytes.
 bytemuck = { version = "1.25", features = ["derive"] }
+
+# The system file dialog. Nothing else in the application opens a window.
+rfd = "0.17"
+
+# No `nalgebra` entry, deliberately: `rigidity_core::nalgebra` (§7.3) is the
+# same crate, and a matrix reaches a uniform through `as_slice()`, which is
+# already column-major and needs no bytemuck conversion at all.
 
 [lints.rust]
 unsafe_code     = "forbid"
