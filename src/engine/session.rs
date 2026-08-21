@@ -40,23 +40,37 @@ pub(crate) struct Session {
     target: Option<Slot>,
 }
 
+/// The surface a report is about, as the solver saw it.
+///
+/// Shipped to the viewer so that anything computed per correspondence can
+/// be drawn on the points it was computed for. Colouring the full-density
+/// cloud instead would mean a nearest-neighbour query per raw point — a
+/// second of work to say the same thing, and an implication that the
+/// number came from there.
+pub(crate) struct Surface {
+    /// The downsampled cloud.
+    pub(crate) cloud: Arc<PointCloud>,
+    /// The normal each correspondence was taken against.
+    ///
+    /// For a registration these are the *target's* normals at the matched
+    /// points, because that is what the Jacobian row is built from. Zero
+    /// where nothing was near enough to match.
+    pub(crate) normals: Arc<Vec<[f32; 3]>>,
+    /// The absolute point-to-plane residual, when there has been a
+    /// registration to have one.
+    pub(crate) residuals: Option<Arc<Vec<f32>>>,
+    /// Where the residual ramp should start and end.
+    pub(crate) span: [f32; 2],
+}
+
 /// Everything a finished registration produces.
 pub(crate) struct Registration {
     /// The pose, residual, iteration count and information matrix.
     pub(crate) result: IcpResult,
     /// What the geometry determined, at the pose found.
     pub(crate) analysis: Analysis,
-    /// The downsampled source, as the solver saw it.
-    ///
-    /// Shipped to the viewer so that the residual can be drawn on the
-    /// points it was actually computed for. Colouring the full-density
-    /// cloud would mean a nearest-neighbour query per raw point — a second
-    /// of work to say the same thing.
-    pub(crate) sampled: Arc<PointCloud>,
-    /// The absolute point-to-plane residual at each of those points.
-    pub(crate) residuals: Arc<Vec<f32>>,
-    /// Where the residual ramp should start and end.
-    pub(crate) span: [f32; 2],
+    /// The moved source, and what it was matched against.
+    pub(crate) surface: Surface,
     /// How many points each side kept after downsampling.
     pub(crate) points: [usize; 2],
 }
@@ -75,7 +89,7 @@ impl Session {
         params: &PrepareParams,
         stale: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(Progress),
-    ) -> Result<Option<(Analysis, usize)>, PipelineError> {
+    ) -> Result<Option<(Analysis, Surface)>, PipelineError> {
         if stale() {
             return Ok(None);
         }
@@ -83,9 +97,24 @@ impl Session {
         if stale() {
             return Ok(None);
         }
-        let prepared = self.target.as_ref().expect("just prepared");
-        let analysis = analyse_cloud(&prepared.prepared)?;
-        Ok(Some((analysis, prepared.prepared.len())))
+        let prepared = &self.target.as_ref().expect("just prepared").prepared;
+        let analysis = analyse_cloud(prepared)?;
+        // A single cloud is its own correspondence at zero residual, so
+        // the normals are its own.
+        let normals = prepared
+            .normals
+            .iter()
+            .map(|n| [n.x as f32, n.y as f32, n.z as f32])
+            .collect();
+        Ok(Some((
+            analysis,
+            Surface {
+                cloud: Arc::new(prepared.cloud.clone()),
+                normals: Arc::new(normals),
+                residuals: None,
+                span: [0.0, 1.0],
+            },
+        )))
     }
 
     /// Registers one surface onto another and reports what the answer is
@@ -135,14 +164,17 @@ impl Session {
         }
 
         let analysis = analyse_registration(moving, fixed, &result.pose, params)?;
-        let (residuals, span) = residuals(moving, fixed, &result.pose, params);
+        let (residuals, normals, span) = matched(moving, fixed, &result.pose, params);
 
         Ok(Some(Registration {
             result,
             analysis,
-            sampled: Arc::new(moving.cloud.clone()),
-            residuals: Arc::new(residuals),
-            span,
+            surface: Surface {
+                cloud: Arc::new(moving.cloud.clone()),
+                normals: Arc::new(normals),
+                residuals: Some(Arc::new(residuals)),
+                span,
+            },
             points: [moving.len(), fixed.len()],
         }))
     }
@@ -170,47 +202,58 @@ fn prepare(
     Ok(())
 }
 
-/// The absolute point-to-plane residual at every point of the moved source.
+/// What each point of the moved source was matched against: its residual
+/// and the normal the Jacobian row was built from.
 ///
-/// The ramp ends at the 95th percentile rather than the maximum: one
-/// outlier at fifty times the median would otherwise flatten every real
-/// difference into the first pixel of the ramp.
-fn residuals(
+/// The two come from one pass because they come from one query. The
+/// normals are what makes the contribution of a point to a singular
+/// direction computable later, on the viewer's side, without another
+/// journey through the index.
+///
+/// The residual ramp ends at the 95th percentile rather than the maximum:
+/// one outlier at fifty times the median would otherwise flatten every
+/// real difference into the first pixel of the ramp.
+fn matched(
     moving: &Prepared,
     fixed: &Prepared,
     pose: &Se3,
     params: &RegisterParams,
-) -> (Vec<f32>, [f32; 2]) {
+) -> (Vec<f32>, Vec<[f32; 3]>, [f32; 2]) {
     let limit = params.max_distance * params.max_distance;
     let mut found = Vec::with_capacity(1);
-    let mut values = Vec::with_capacity(moving.cloud.len());
+    let mut residuals = Vec::with_capacity(moving.cloud.len());
+    let mut normals = Vec::with_capacity(moving.cloud.len());
     for index in 0..moving.cloud.len() {
         let point = pose.transform_point(&moving.cloud.point(index));
         fixed.tree.knn_into(&point, 1, &mut found);
-        let residual = match found.first() {
+        match found.first() {
             Some(nearest) if nearest.distance_squared <= limit => {
                 let matched = nearest.index as usize;
+                let normal = fixed.normals[matched];
                 let offset: na::Vector3<f64> = point - fixed.cloud.point(matched);
-                fixed.normals[matched].dot(&offset).abs()
+                residuals.push(normal.dot(&offset).abs() as f32);
+                normals.push([normal.x as f32, normal.y as f32, normal.z as f32]);
             }
             // A point with nothing near enough took no part in the answer.
-            // Zero says "not a large residual", which would be a lie; the
-            // ramp's cold end is the least misleading place to put it,
-            // and the correspondence count next to the report says how
-            // many such points there were.
-            _ => 0.0,
-        };
-        values.push(residual as f32);
+            // Zero residual says "close", which would be a lie, but the
+            // ramp's cold end is the least misleading place to put it; a
+            // zero normal is not a lie at all — it contributes nothing to
+            // every direction, which is exactly what happened.
+            _ => {
+                residuals.push(0.0);
+                normals.push([0.0; 3]);
+            }
+        }
     }
 
-    let mut sorted = values.clone();
+    let mut sorted = residuals.clone();
     sorted.sort_by(f32::total_cmp);
     let percentile = sorted
         .get((sorted.len().saturating_sub(1)) * 95 / 100)
         .copied()
         .unwrap_or(1.0)
         .max(1e-6);
-    (values, [0.0, percentile])
+    (residuals, normals, [0.0, percentile])
 }
 
 #[cfg(test)]
@@ -287,7 +330,7 @@ mod tests {
             cloud: Arc::new(rigidity_io::read_ply(&target).expect("the fixture would not read")),
             generation: 1,
         };
-        let (analysis, _) = session
+        let (analysis, _surface) = session
             .analyse(&held, &prepare, &|| false, &mut |_| {})
             .expect("the viewer's pipeline failed")
             .expect("the viewer's pipeline was abandoned with nothing to abandon it");

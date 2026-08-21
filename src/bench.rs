@@ -30,6 +30,12 @@ const WARMUP: usize = 30;
 
 /// The measurement in progress.
 pub(crate) struct Bench {
+    /// A σ row to hold the pointer on, and where in the swing to stop the
+    /// clock. Together they let the null-space demonstration be measured:
+    /// two runs on the same row, one at rest and one at the extreme,
+    /// differ only by the motion under test.
+    row: Option<usize>,
+    phase: Option<f64>,
     seconds: f32,
     started: Option<Instant>,
     frames: Vec<f32>,
@@ -42,12 +48,28 @@ impl Bench {
     pub(crate) fn from_environment() -> Option<Self> {
         let seconds: f32 = std::env::var("RIGIDITY_UI_BENCH").ok()?.parse().ok()?;
         Some(Self {
+            row: std::env::var("RIGIDITY_UI_HOVER")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+            phase: std::env::var("RIGIDITY_UI_PHASE")
+                .ok()
+                .and_then(|value| value.parse().ok()),
             seconds,
             started: None,
             frames: Vec::new(),
             shot: std::env::var("RIGIDITY_UI_SHOT").ok().map(PathBuf::from),
             finished: false,
         })
+    }
+
+    /// Which σ row to pretend the pointer is on.
+    pub(crate) fn row(&self) -> Option<usize> {
+        self.row
+    }
+
+    /// The pinned clock, as a fraction of one swing.
+    pub(crate) fn clock(&self) -> Option<f64> {
+        self.phase.map(|phase| phase * crate::app::App::PERIOD)
     }
 
     /// Turns the camera one step and records the frame.
@@ -59,9 +81,13 @@ impl Bench {
         if !loaded {
             return;
         }
-        // Orbiting is what the gate asks about: a still camera measures the
-        // compositor, not the renderer.
-        camera.orbit([6.0, 0.0]);
+        // Orbiting is what the frame-time gate asks about: a still camera
+        // measures the compositor, not the renderer. It is suppressed when
+        // a row is pinned, because then the camera must be identical
+        // between runs or the comparison measures the camera.
+        if self.row.is_none() {
+            camera.orbit([6.0, 0.0]);
+        }
         ctx.request_repaint();
 
         let elapsed = ctx.input(|input| input.unstable_dt);

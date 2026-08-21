@@ -16,7 +16,33 @@ use rigidity_core::lie::Se3;
 use rigidity_core::observability::Analysis;
 use rigidity_pipeline::{PipelineError, PrepareParams, Progress, RegisterParams};
 
-use super::session::Registration;
+use super::session::{Registration, Surface};
+
+/// Which built-in scene to generate.
+///
+/// Three, not the seven `rigidity-scenes` offers: one that is degenerate
+/// by construction, one that is not, and one that is curved. A menu of
+/// seven would be a menu; three is an explanation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Demo {
+    /// A corridor: translation along it is unobservable.
+    Corridor,
+    /// A trihedral corner: every degree of freedom is determined.
+    Corner,
+    /// A sphere: rotation about its centre is unobservable.
+    Sphere,
+}
+
+impl Demo {
+    /// The name shown on the button.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Corridor => "corridor",
+            Self::Corner => "corner",
+            Self::Sphere => "sphere",
+        }
+    }
+}
 
 /// A cloud and a number that changes when the cloud does.
 ///
@@ -34,6 +60,12 @@ pub(crate) struct Held {
 pub(crate) enum Job {
     /// Read a point cloud from disk.
     Load(PathBuf),
+    /// Generate a scene with an analytically known null space, and a copy
+    /// of it displaced by a known amount.
+    ///
+    /// The application explains itself in one click to someone who has no
+    /// dataset to hand, which is most people the first time.
+    Scene(Demo),
     /// Prepare a surface and report what its geometry would determine.
     Analyse {
         /// Which request this is.
@@ -71,6 +103,12 @@ pub(crate) enum Event {
         /// The points, shared rather than copied — the renderer takes a
         /// handle to the same allocation.
         cloud: Arc<PointCloud>,
+        /// Whether the cloud was generated rather than read.
+        ///
+        /// The command line the viewer can hand back has to name files,
+        /// and a generated scene has none — so it names the `rigidity
+        /// scene` invocations that would produce them first.
+        generated: bool,
         /// The bounding box, in absolute coordinates.
         ///
         /// Absolute rather than local because two clouds have two origins,
@@ -104,8 +142,8 @@ pub(crate) enum Event {
         id: u64,
         /// The conditioning of the prepared surface.
         analysis: Box<Analysis>,
-        /// How many points survived downsampling.
-        points: usize,
+        /// The surface it is about.
+        surface: Box<Surface>,
         /// How long the whole request took.
         seconds: f64,
     },

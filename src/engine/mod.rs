@@ -18,12 +18,14 @@ use std::time::Instant;
 use rigidity_core::PointCloud;
 use rigidity_core::icp::IterationReport;
 use rigidity_core::lie::Se3;
+use rigidity_core::nalgebra as na;
 use rigidity_pipeline::{PipelineError, PrepareParams, RegisterParams};
+use rigidity_scenes::{Scene, SceneKind, SceneParams};
 
 pub(crate) mod job;
 pub(crate) mod session;
 
-pub(crate) use job::{Event, Held, Job};
+pub(crate) use job::{Demo, Event, Held, Job};
 use session::Session;
 
 /// A handle to the worker thread.
@@ -75,6 +77,11 @@ impl Engine {
     /// Queues a file to read.
     pub(crate) fn load(&self, path: PathBuf) {
         self.send(Job::Load(path));
+    }
+
+    /// Queues a built-in scene and its displaced copy.
+    pub(crate) fn scene(&self, demo: Demo) {
+        self.send(Job::Scene(demo));
     }
 
     /// Queues an analysis, superseding any earlier request.
@@ -149,6 +156,7 @@ fn run(
             let event = match rigidity_io::read_ply(&path) {
                 Ok(cloud) => Event::Loaded {
                     path,
+                    generated: false,
                     bounds: bounds_of(&cloud),
                     cloud: Arc::new(cloud),
                     seconds: start.elapsed().as_secs_f64(),
@@ -156,6 +164,24 @@ fn run(
                 Err(source) => Event::Failed(PipelineError::Read { path, source }),
             };
             emit(events, ctx, event);
+        }
+
+        Job::Scene(demo) => {
+            let start = Instant::now();
+            for (name, cloud) in demo_pair(demo) {
+                let bounds = bounds_of(&cloud);
+                emit(
+                    events,
+                    ctx,
+                    Event::Loaded {
+                        path: PathBuf::from(name),
+                        generated: true,
+                        cloud: Arc::new(cloud),
+                        bounds,
+                        seconds: start.elapsed().as_secs_f64(),
+                    },
+                );
+            }
         }
 
         Job::Analyse {
@@ -168,10 +194,10 @@ fn run(
             let mut progress = |progress| emit(events, ctx, Event::Working { id, progress });
 
             let event = match session.analyse(&target, &prepare, &stale, &mut progress) {
-                Ok(Some((analysis, points))) => Event::Analysed {
+                Ok(Some((analysis, surface))) => Event::Analysed {
                     id,
                     analysis: Box::new(analysis),
-                    points,
+                    surface: Box::new(surface),
                     seconds: start.elapsed().as_secs_f64(),
                 },
                 Ok(None) => Event::Abandoned { id },
@@ -229,6 +255,36 @@ fn run(
     }
 }
 
+/// A demo scene and a copy of it displaced by a known amount.
+///
+/// Target first, then source, which is the order the application fills its
+/// two roles in. The displacement is the one the CLI's own demo uses, so
+/// what appears on screen can be checked against the README.
+fn demo_pair(demo: Demo) -> [(String, PointCloud); 2] {
+    let (kind, name) = match demo {
+        Demo::Corridor => (SceneKind::Corridor, "corridor"),
+        Demo::Corner => (SceneKind::Corner, "corner"),
+        Demo::Sphere => (SceneKind::Sphere, "sphere"),
+    };
+    let scene = Scene::generate(
+        kind,
+        SceneParams {
+            points_per_face: 60_000,
+            // Two millimetres, about what a good terrestrial scanner
+            // leaves at these ranges. A noiseless demo would flatter the
+            // report.
+            noise_sigma: 0.002,
+            ..SceneParams::default()
+        },
+    );
+    let motion = Se3::exp(&na::Vector6::new(0.03, 0.02, 0.01, 0.0, 0.0, 0.0));
+    let moved = rigidity_pipeline::transform_cloud(&scene.cloud, &motion);
+    [
+        (format!("{name}-target.ply"), scene.cloud),
+        (format!("{name}-source.ply"), moved),
+    ]
+}
+
 fn emit(events: &Sender<Event>, ctx: &eframe::egui::Context, event: Event) {
     if events.send(event).is_ok() {
         ctx.request_repaint();
@@ -242,4 +298,33 @@ fn emit(events: &Sender<Event>, ctx: &eframe::egui::Context, event: Event) {
 fn bounds_of(cloud: &PointCloud) -> Option<([f64; 3], [f64; 3])> {
     let (min, max) = cloud.bounds()?;
     Some(([min.x, min.y, min.z], [max.x, max.y, max.z]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every demo produces two clouds a registration can actually be run
+    /// on, displaced by the amount the copied command line claims.
+    ///
+    /// The button is the only caller, and a button cannot be pressed from
+    /// a test — so the work behind it is a function, and this is that
+    /// function's test.
+    #[test]
+    fn every_demo_makes_a_registrable_pair() {
+        for demo in [Demo::Corridor, Demo::Corner, Demo::Sphere] {
+            let [(target_name, target), (source_name, source)] = demo_pair(demo);
+            assert!(target_name.ends_with("-target.ply"), "{target_name}");
+            assert!(source_name.ends_with("-source.ply"), "{source_name}");
+            assert!(target.len() > 10_000, "{demo:?}: {} points", target.len());
+            assert_eq!(target.len(), source.len());
+
+            let offset = source.point(0) - target.point(0);
+            let expected = na::Vector3::new(0.03, 0.02, 0.01);
+            assert!(
+                (offset - expected).norm() < 1e-6,
+                "{demo:?}: displaced by {offset:?}"
+            );
+        }
+    }
 }

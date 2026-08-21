@@ -24,7 +24,7 @@ without stage 2 has nowhere to put its scans.
 | M1 — Cloud rendering | **done** | splats, orbit camera, EDL, 1.05 M at 120 fps |
 | M2 — Pipeline and spectrum | **done** | jobs, cancel, σ panel, parity with the CLI |
 | M3 — Registration | **done** | live ICP, timeline, residuals, basin warning |
-| M4 — Null-space visualisation | not started | the feature the app exists for |
+| M4 — Null-space visualisation | **done** | hover to move, |n·v| colouring, demos |
 | M5 — Polish | not started | theme, palette, keyboard, errors |
 | M6 — Packaging | not started | `.app` bundle, CI on three OS |
 | **Stage 2 — the workbench** | | |
@@ -659,11 +659,48 @@ from the cloud shader and from Rust, and wgpu rejected the first draw with
 the tests could see it — only running the thing could. Two shaders sharing
 one uniform buffer must be edited together, and both files now say so.
 
-**M4 — Null-space visualisation.** Hover-to-oscillate, contribution
-colouring, "copy CLI command", demo scenes from `rigidity-scenes`.
-*Gate:* on the corridor pair, hovering σ₆ moves the cloud visibly along the
-corridor axis and the rendered image barely changes; hovering σ₁ tears the
-walls apart. Recorded as a short screen capture attached to the milestone.
+**M4 — Null-space visualisation. Done.** Hover a σ row and the cloud
+swings along that direction while every point takes the colour of its own
+`|n·v|`; three demo scenes; and the command line that reproduces what is on
+screen, copied to the clipboard.
+*Gate: passed, and as a number rather than a recording.* The harness pins a
+row and stops the clock at a chosen point in the swing, so two runs differ
+only by the motion under test. Moving the corridor by the same 101 mm along
+each direction changes
+
+| direction | viewport pixels changed |
+|---|---|
+| σ₁ — across the corridor | **6.03 %** |
+| σ₆ — along the corridor | **0.43 %** |
+
+Fourteen times less response to an identical perturbation, which is the
+whole claim, measured instead of asserted. A screen recording would have
+shown the same thing and proved nothing.
+
+The colouring says the same in a second way, and this is the part worth
+looking at: hovering σ₁ lights up **the two walls and not the floor** —
+the floor's normal is perpendicular to the motion, so it contributes
+nothing to resisting it — while hovering σ₆ lights up almost nothing at
+all. Correct physics, readable at a glance, from `n·(ρ + φ×p)` and nothing
+else.
+
+Two decisions inside it:
+
+- **The amplitude is the same for every direction**, a fixed half percent
+  of the scene, rather than each direction's own predicted spread. The
+  experiment is *apply the same perturbation and watch the response*, and
+  the response is exactly what σᵢ measures; scaling the motion by the
+  spread would cancel the difference it exists to show.
+- **`direction_in_world` is already a twist about the coordinate origin**,
+  so the motion is `exp(a·ξᵢ)` and nothing needs centring by hand. The
+  rotation lands about the centroid of the correspondences, where the
+  report put it.
+
+Not built, and deliberately: **the arrow field**. §5 lists three views of
+one identity and this milestone ships two. Arrows would need a line
+pipeline of their own to show the same `v` the swing already shows
+integrated and the colour already shows projected. If a scene ever turns up
+where neither reads, it can be added then.
 
 **M5 — Polish.** Theme, palette, drag and drop, empty states, typed error
 surfaces, full keyboard coverage, README.
