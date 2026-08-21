@@ -33,13 +33,10 @@ fn main() -> eframe::Result {
         // therefore must not expect either.
         ..Default::default()
     };
-    // Up to two files: the target, then the source. Anything more belongs
-    // to the CLI, which is a different program with a different job.
-    let open: Vec<PathBuf> = std::env::args()
-        .skip(1)
-        .take(2)
-        .map(PathBuf::from)
-        .collect();
+    // Every file named on the command line, in order. The first becomes
+    // the target and the second the source; the rest are context until
+    // someone gives them a role.
+    let open: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
     eframe::run_native(
         "rigidity",
         options,

@@ -76,6 +76,8 @@ pub(crate) struct Palette {
     /// Distinct from [`point`](Self::point) because the whole question on
     /// screen is which of the two is which, and shading alone cannot say.
     pub(crate) point_moving: Color32,
+    /// Colours for the third cloud onwards.
+    pub(crate) series: [Color32; 4],
     /// An unclassified point in the viewport.
     ///
     /// Not `text`: the viewport is the darker surface in one theme and the
@@ -91,6 +93,22 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
+    /// The colour of the n-th cloud in the scene.
+    ///
+    /// The first two are the ones a registration has always used, so a
+    /// two-cloud scene looks exactly as it did before there was a list.
+    /// Beyond that the series has to stay apart from itself as well as
+    /// from the background, which is why it is six deliberate colours
+    /// rather than a hue rotation — a generated ramp puts two greens next
+    /// to each other sooner or later and there is no way to notice.
+    pub(crate) fn cloud(&self, index: usize) -> Color32 {
+        [self.point, self.point_moving]
+            .into_iter()
+            .chain(self.series)
+            .nth(index % 6)
+            .unwrap_or(self.point)
+    }
+
     /// The palette for a mode.
     ///
     /// The three observability colours run teal → amber → orange, along
@@ -111,6 +129,12 @@ impl Palette {
                 accent: Color32::from_rgb(0x6A, 0xA9, 0xFF),
                 point: Color32::from_rgb(0xC8, 0xCD, 0xD4),
                 point_moving: Color32::from_rgb(0x7C, 0xB0, 0xF0),
+                series: [
+                    Color32::from_rgb(0x8F, 0xD1, 0xA8),
+                    Color32::from_rgb(0xD9, 0xA0, 0xD6),
+                    Color32::from_rgb(0xE0, 0xC0, 0x8A),
+                    Color32::from_rgb(0xE8, 0x9A, 0x9A),
+                ],
                 high: Color32::from_rgb(0x4F, 0xB8, 0xA8),
                 medium: Color32::from_rgb(0xE0, 0xB3, 0x41),
                 low: Color32::from_rgb(0xE5, 0x73, 0x4A),
@@ -126,6 +150,12 @@ impl Palette {
                 accent: Color32::from_rgb(0x2A, 0x6B, 0xD7),
                 point: Color32::from_rgb(0x3A, 0x41, 0x4A),
                 point_moving: Color32::from_rgb(0x1E, 0x5F, 0xC8),
+                series: [
+                    Color32::from_rgb(0x1E, 0x7A, 0x46),
+                    Color32::from_rgb(0x7A, 0x3A, 0x94),
+                    Color32::from_rgb(0x7A, 0x5A, 0x18),
+                    Color32::from_rgb(0x9A, 0x3A, 0x3A),
+                ],
                 high: Color32::from_rgb(0x1A, 0x7C, 0x6F),
                 medium: Color32::from_rgb(0x93, 0x67, 0x17),
                 low: Color32::from_rgb(0xBA, 0x4C, 0x28),
@@ -316,6 +346,15 @@ mod tests {
                 assert!(
                     ratio >= 3.0,
                     "{mode:?}: {name} in the viewport is {ratio:.2}:1"
+                );
+            }
+            // Every cloud in the series, not just the first two: the
+            // fifth is as much a cloud as the first.
+            for index in 0..6 {
+                let ratio = contrast(palette.cloud(index), palette.background);
+                assert!(
+                    ratio >= 3.0,
+                    "{mode:?}: cloud {index} in the viewport is {ratio:.2}:1"
                 );
             }
             let apart = contrast(palette.point, palette.point_moving);

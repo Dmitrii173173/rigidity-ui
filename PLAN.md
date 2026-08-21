@@ -28,7 +28,7 @@ without stage 2 has nowhere to put its scans.
 | M5 — Polish | **done** | ⌘K, both themes measured, errors, README |
 | M6 — Packaging | **done** | `.app` bundle, generated icon, CI (needs a remote) |
 | **Stage 2 — the workbench** | | |
-| W1 — Many clouds | not started | scene list, visibility, per-cloud display |
+| W1 — Many clouds | **done** | scene list, roles as chips, one buffer per cloud |
 | W2 — Scalar fields | not started | ramps, histogram, cloud-to-cloud distance |
 | W3 — Selection and geometry | not started | crop, cross-section, measure, subsample |
 | W4 — Manual alignment | not started | point-pair picking; the answer to a wrong basin |
@@ -787,13 +787,34 @@ where it was, and undo is therefore free and total. That single decision
 removes an undo stack, a dirty-state model and a save-before-quit dialog
 from the application.
 
-**W1 — Many clouds.** The scene stops being two slots and becomes a list:
-visibility, colour, point size and a transform per entry. "Source" and
-"target" become *roles* assigned to two entries rather than a pair of
-loaders. The inspector grows a scene section above the spectrum.
-*Gate:* five clouds loaded at once, hiding one is instant, and each cloud
-owns exactly one GPU buffer — a duplicate upload for a second view of the
-same points is a bug, not an optimisation to do later.
+**W1 — Many clouds. Done.** The scene is a list. Each entry has a colour,
+a visibility switch and two role chips; *source* and *target* are roles
+given to two of the entries rather than a pair of loaders, so a third cloud
+can be loaded for context and the roles reassigned without reloading
+anything.
+*Gate: passed on the clause that mattered.* Five clouds loaded at once cost
+**five coordinate uploads** — the harness counts them and prints the total.
+Hiding is instant by construction rather than by measurement: a hidden
+cloud stays in the draw list and is skipped at the draw call, so the buffer
+cache never sees it leave. Evicting on invisibility would have made the
+tick a one-second pause, which is the opposite of what the tick is for.
+
+The bug the gate was written to prevent was real and was there: buffers
+were indexed by draw order, so hiding the second of three clouds handed the
+third the second's coordinates and re-uploaded everything behind it. They
+are keyed by the cloud now.
+
+Two rules make the chips work, and they are a tested function rather than
+a paragraph: a cloud cannot hold both roles, and clicking the role it
+already holds puts it down — which is the only way back from a registration
+to analysing one surface on its own.
+
+Not built: a per-entry point size, and a per-entry transform beyond the
+registration's own. Both are listed in this plan's original sentence and
+neither has a tool that needs it yet — the transform arrives with manual
+alignment (W4), and a per-cloud point size is worth having when there is a
+scene where one cloud is ten times denser than another, which is W5's
+problem.
 
 **W2 — Scalar fields.** One scalar per point, a ramp, and a histogram whose
 handles clamp the ramp without touching the data. The fields that feed it:

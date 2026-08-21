@@ -14,6 +14,8 @@
 //! Nothing here knows about `rigidity` beyond `PointCloud`'s three
 //! coordinate columns.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use eframe::egui::PaintCallbackInfo;
@@ -70,7 +72,6 @@ struct Targets {
 /// arrays, and uploading them as three vertex streams means the
 /// coordinates reach the GPU without a single copy on the way.
 struct Buffers {
-    generation: u64,
     count: u32,
     x: wgpu::Buffer,
     y: wgpu::Buffer,
@@ -79,11 +80,14 @@ struct Buffers {
     scalar_generation: u64,
 }
 
-/// One drawable cloud: its uniform, its bind group and its coordinates.
+/// One draw's uniform and the bind group that reads it.
+///
+/// Uniforms are per *draw* and coordinates are per *cloud*: two draws of
+/// the same points at different poses would share the coordinates and not
+/// the matrix, which is why the two are stored apart.
 struct Slot {
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    buffers: Option<Buffers>,
 }
 
 /// What the viewport keeps between frames.
@@ -97,6 +101,16 @@ struct Resources {
     target_layout: wgpu::BindGroupLayout,
     targets: Option<Targets>,
     slots: Vec<Slot>,
+    /// Coordinates, keyed by the cloud they belong to.
+    ///
+    /// Keyed rather than indexed, because the draw order changes whenever
+    /// a cloud is hidden, and an index would then hand slot two's buffers
+    /// to slot three's points. Re-uploading a million coordinates because
+    /// someone unticked a checkbox is the kind of thing that is never
+    /// noticed and never forgiven.
+    clouds: HashMap<u64, Buffers>,
+    /// How many uploads have happened, for the measurement harness.
+    uploads: u64,
 }
 
 impl Resources {
@@ -150,7 +164,62 @@ impl Resources {
         });
     }
 
-    /// Makes sure there are as many slots as there are clouds to draw.
+    /// Uploads a cloud's coordinates, if they are not already there.
+    fn ensure_cloud(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draw: &CloudDraw) {
+        let upload = |label: &str, values: &[f32]| {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (size_of::<f32>() * values.len().max(1)) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(values));
+            buffer
+        };
+
+        let mut uploaded = false;
+        if let Entry::Vacant(slot) = self.clouds.entry(draw.generation) {
+            let (x, y, z) = draw.cloud.columns();
+            slot.insert(Buffers {
+                count: draw.cloud.len() as u32,
+                x: upload("cloud x", x),
+                y: upload("cloud y", y),
+                z: upload("cloud z", z),
+                scalar: None,
+                scalar_generation: 0,
+            });
+            uploaded = true;
+        }
+        self.uploads += u64::from(uploaded);
+
+        let buffers = self
+            .clouds
+            .get_mut(&draw.generation)
+            .expect("just inserted");
+        match &draw.scalar {
+            Some(values) if buffers.scalar_generation != draw.scalar_generation => {
+                buffers.scalar = Some(upload("cloud scalar", values));
+                buffers.scalar_generation = draw.scalar_generation;
+            }
+            None => {
+                buffers.scalar = None;
+                buffers.scalar_generation = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Forgets the coordinates of anything no longer in the scene.
+    ///
+    /// A cloud that is merely hidden is still listed, so its buffers stay
+    /// and showing it again costs nothing — which is the point of hiding
+    /// it in the first place.
+    fn forget_absent(&mut self, draws: &[CloudDraw]) {
+        self.clouds
+            .retain(|generation, _| draws.iter().any(|draw| draw.generation == *generation));
+    }
+
+    /// Makes sure there are as many uniform slots as there are draws.
     fn ensure_slots(&mut self, device: &wgpu::Device, wanted: usize) {
         while self.slots.len() < wanted {
             let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -170,55 +239,8 @@ impl Resources {
             self.slots.push(Slot {
                 uniform,
                 bind_group,
-                buffers: None,
             });
         }
-    }
-}
-
-/// Uploads a cloud's coordinates, if they are not the ones already there.
-fn ensure_buffers(slot: &mut Slot, device: &wgpu::Device, queue: &wgpu::Queue, draw: &CloudDraw) {
-    let upload = |label: &str, values: &[f32]| {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (size_of::<f32>() * values.len().max(1)) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(values));
-        buffer
-    };
-
-    if !slot
-        .buffers
-        .as_ref()
-        .is_some_and(|old| old.generation == draw.generation)
-    {
-        let (x, y, z) = draw.cloud.columns();
-        slot.buffers = Some(Buffers {
-            generation: draw.generation,
-            count: draw.cloud.len() as u32,
-            x: upload("cloud x", x),
-            y: upload("cloud y", y),
-            z: upload("cloud z", z),
-            scalar: None,
-            scalar_generation: 0,
-        });
-    }
-
-    let Some(buffers) = slot.buffers.as_mut() else {
-        return;
-    };
-    match &draw.scalar {
-        Some(values) if buffers.scalar_generation != draw.scalar_generation => {
-            buffers.scalar = Some(upload("cloud scalar", values));
-            buffers.scalar_generation = draw.scalar_generation;
-        }
-        None => {
-            buffers.scalar = None;
-            buffers.scalar_generation = 0;
-        }
-        _ => {}
     }
 }
 
@@ -404,16 +426,36 @@ pub(crate) fn install(render_state: Option<&RenderState>) -> bool {
         target_layout,
         targets: None,
         slots: Vec::new(),
+        clouds: HashMap::new(),
+        uploads: 0,
     });
     true
+}
+
+/// How many coordinate uploads have happened since the window opened.
+///
+/// One per cloud is the whole of the claim: hiding, showing, recolouring
+/// and re-posing must all cost nothing. The harness prints it.
+pub(crate) fn uploads(render_state: Option<&RenderState>) -> Option<u64> {
+    let state = render_state?;
+    let renderer = state.renderer.read();
+    renderer
+        .callback_resources
+        .get::<Resources>()
+        .map(|resources| resources.uploads)
 }
 
 /// One cloud, as the frame wants it drawn.
 pub(crate) struct CloudDraw {
     /// The points. Shared, never copied.
     pub(crate) cloud: Arc<PointCloud>,
-    /// Bumped whenever `cloud` becomes a different cloud.
+    /// Which cloud this is. Coordinates are cached under it.
     pub(crate) generation: u64,
+    /// Whether to draw it at all.
+    ///
+    /// A hidden cloud is still listed, and still holds its buffers: the
+    /// point of hiding one is to look at the others *now*.
+    pub(crate) visible: bool,
     /// Where it sits, column-major.
     ///
     /// A registration moves a cloud by writing this matrix. The points
@@ -462,6 +504,7 @@ impl CallbackTrait for ViewportCallback {
         };
         resources.ensure_targets(device, self.size);
         resources.ensure_slots(device, self.draws.len());
+        resources.forget_absent(&self.draws);
         queue.write_buffer(
             &resources.frame_buffer,
             0,
@@ -475,8 +518,10 @@ impl CallbackTrait for ViewportCallback {
             }),
         );
 
-        for (slot, draw) in resources.slots.iter_mut().zip(&self.draws) {
-            ensure_buffers(slot, device, queue, draw);
+        for draw in &self.draws {
+            resources.ensure_cloud(device, queue, draw);
+        }
+        for (slot, draw) in resources.slots.iter().zip(&self.draws) {
             queue.write_buffer(
                 &slot.uniform,
                 0,
@@ -528,8 +573,11 @@ impl CallbackTrait for ViewportCallback {
         });
         pass.set_pipeline(&resources.cloud_pipeline);
         pass.set_bind_group(0, &resources.frame_bind_group, &[]);
-        for slot in &resources.slots {
-            let Some(buffers) = &slot.buffers else {
+        for (slot, draw) in resources.slots.iter().zip(&self.draws) {
+            if !draw.visible {
+                continue;
+            }
+            let Some(buffers) = resources.clouds.get(&draw.generation) else {
                 continue;
             };
             if buffers.count == 0 {

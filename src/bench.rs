@@ -39,6 +39,8 @@ pub(crate) struct Bench {
     /// Whether to open the command list, so that it can be looked at.
     commands: bool,
     seconds: f32,
+    /// Coordinate uploads so far. One per cloud is the claim W1 makes.
+    uploads: Option<u64>,
     started: Option<Instant>,
     frames: Vec<f32>,
     shot: Option<PathBuf>,
@@ -57,6 +59,7 @@ impl Bench {
                 .ok()
                 .and_then(|value| value.parse().ok()),
             commands: std::env::var("RIGIDITY_UI_COMMANDS").is_ok(),
+            uploads: None,
             seconds,
             started: None,
             frames: Vec::new(),
@@ -81,7 +84,14 @@ impl Bench {
     }
 
     /// Turns the camera one step and records the frame.
-    pub(crate) fn step(&mut self, ctx: &Context, camera: &mut Camera, loaded: bool) {
+    pub(crate) fn step(
+        &mut self,
+        ctx: &Context,
+        camera: &mut Camera,
+        loaded: bool,
+        uploads: Option<u64>,
+    ) {
+        self.uploads = uploads;
         if self.finished {
             self.collect_shot(ctx);
             return;
@@ -132,6 +142,9 @@ impl Bench {
             1000.0 / at(0.95),
             at(1.0),
         );
+        if let Some(uploads) = self.uploads {
+            println!("coordinate uploads {uploads}");
+        }
         self.after_measuring(ctx);
     }
 
