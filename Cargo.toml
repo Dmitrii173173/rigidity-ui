@@ -24,6 +24,10 @@ rigidity-io       = { path = "../rigidity/crates/rigidity-io" }
 # missing is a test that passes for the wrong reason).
 rigidity-scenes   = { path = "../rigidity/crates/rigidity-scenes" }
 rigidity-pipeline = { path = "../rigidity/crates/rigidity-pipeline" }
+# The index, used directly for cloud-to-cloud distance: that question is
+# about every point of both clouds, not about the downsampled surfaces the
+# pipeline prepares for the solver.
+rigidity-spatial  = { path = "../rigidity/crates/rigidity-spatial" }
 
 # One dependency for the whole UI and GPU stack: eframe re-exports the
 # `egui`, `egui_wgpu` and `wgpu` it was built against, so those three can

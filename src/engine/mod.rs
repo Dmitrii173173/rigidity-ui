@@ -19,25 +19,25 @@ use rigidity_core::PointCloud;
 use rigidity_core::icp::IterationReport;
 use rigidity_core::lie::Se3;
 use rigidity_core::nalgebra as na;
-use rigidity_pipeline::{PipelineError, PrepareParams, RegisterParams};
+use rigidity_pipeline::{PipelineError, PrepareParams, Progress, RegisterParams};
 use rigidity_scenes::{Scene, SceneKind, SceneParams};
 
 pub(crate) mod job;
 pub(crate) mod session;
 
-pub(crate) use job::{Demo, Event, Held, Job};
+pub(crate) use job::{Demo, Event, Held, Job, Lane, Step};
 use session::Session;
 
 /// A handle to the worker thread.
 pub(crate) struct Engine {
     jobs: Sender<Job>,
     events: Receiver<Event>,
-    /// The request the application still wants an answer to.
+    /// The request the application still wants an answer to, per lane.
     ///
     /// Shared with the worker, which abandons anything else. One counter
-    /// serves both cancellation and supersession, because to the worker
-    /// they are the same fact: nobody is waiting.
-    wanted: Arc<AtomicU64>,
+    /// per lane serves both cancellation and supersession, because to the
+    /// worker they are the same fact: nobody is waiting.
+    wanted: Arc<[AtomicU64; Lane::COUNT]>,
     /// The last identifier handed out.
     issued: u64,
 }
@@ -51,7 +51,7 @@ impl Engine {
     pub(crate) fn spawn(ctx: eframe::egui::Context) -> Self {
         let (job_sender, job_receiver) = channel::<Job>();
         let (event_sender, event_receiver) = channel::<Event>();
-        let wanted = Arc::new(AtomicU64::new(0));
+        let wanted = Arc::new([const { AtomicU64::new(0) }; Lane::COUNT]);
         let worker_wanted = Arc::clone(&wanted);
 
         thread::Builder::new()
@@ -89,12 +89,19 @@ impl Engine {
     /// Returns the identifier: events carry it, and the application ignores
     /// answers to questions it has stopped asking.
     pub(crate) fn analyse(&mut self, target: Held, prepare: PrepareParams) -> u64 {
-        let id = self.issue();
+        let id = self.issue(Lane::Report);
         self.send(Job::Analyse {
             id,
             target,
             prepare,
         });
+        id
+    }
+
+    /// Queues a distance field, superseding any earlier request.
+    pub(crate) fn measure(&mut self, from: Held, to: Held, pose: Se3) -> u64 {
+        let id = self.issue(Lane::Measure);
+        self.send(Job::Distance { id, from, to, pose });
         id
     }
 
@@ -107,7 +114,7 @@ impl Engine {
         params: RegisterParams,
         initial: Se3,
     ) -> u64 {
-        let id = self.issue();
+        let id = self.issue(Lane::Report);
         self.send(Job::Register {
             id,
             source,
@@ -119,15 +126,16 @@ impl Engine {
         id
     }
 
-    fn issue(&mut self) -> u64 {
+    fn issue(&mut self, lane: Lane) -> u64 {
         self.issued += 1;
-        self.wanted.store(self.issued, Ordering::Relaxed);
+        self.wanted[lane.index()].store(self.issued, Ordering::Relaxed);
         self.issued
     }
 
-    /// Abandons whatever is in flight.
+    /// Abandons everything in flight, in every lane.
     pub(crate) fn cancel(&mut self) {
-        self.issue();
+        self.issue(Lane::Report);
+        self.issue(Lane::Measure);
     }
 
     /// Everything reported since the last frame.
@@ -145,7 +153,7 @@ impl Engine {
 fn run(
     job: Job,
     session: &mut Session,
-    wanted: &AtomicU64,
+    wanted: &[AtomicU64; Lane::COUNT],
     events: &Sender<Event>,
     ctx: &eframe::egui::Context,
 ) {
@@ -162,6 +170,31 @@ fn run(
                     seconds: start.elapsed().as_secs_f64(),
                 },
                 Err(source) => Event::Failed(PipelineError::Read { path, source }),
+            };
+            emit(events, ctx, event);
+        }
+
+        Job::Distance { id, from, to, pose } => {
+            let stale = || wanted[Lane::Measure.index()].load(Ordering::Relaxed) != id;
+            let entry = from.generation;
+            let mut progress = |done, total| {
+                emit(
+                    events,
+                    ctx,
+                    Event::Working {
+                        id,
+                        step: Step {
+                            label: "measuring",
+                            done,
+                            total,
+                        },
+                    },
+                );
+            };
+            let event = match session.distances(&from, &to, &pose, &stale, &mut progress) {
+                Ok(Some(values)) => Event::Measured { id, entry, values },
+                Ok(None) => Event::Abandoned { id },
+                Err(error) => Event::Failed(error),
             };
             emit(events, ctx, event);
         }
@@ -190,8 +223,17 @@ fn run(
             prepare,
         } => {
             let start = Instant::now();
-            let stale = || wanted.load(Ordering::Relaxed) != id;
-            let mut progress = |progress| emit(events, ctx, Event::Working { id, progress });
+            let stale = || wanted[Lane::Report.index()].load(Ordering::Relaxed) != id;
+            let mut progress = |progress: Progress| {
+                emit(
+                    events,
+                    ctx,
+                    Event::Working {
+                        id,
+                        step: progress.into(),
+                    },
+                );
+            };
 
             let event = match session.analyse(&target, &prepare, &stale, &mut progress) {
                 Ok(Some((analysis, surface))) => Event::Analysed {
@@ -215,8 +257,17 @@ fn run(
             initial,
         } => {
             let start = Instant::now();
-            let stale = || wanted.load(Ordering::Relaxed) != id;
-            let mut progress = |progress| emit(events, ctx, Event::Working { id, progress });
+            let stale = || wanted[Lane::Report.index()].load(Ordering::Relaxed) != id;
+            let mut progress = |progress: Progress| {
+                emit(
+                    events,
+                    ctx,
+                    Event::Working {
+                        id,
+                        step: progress.into(),
+                    },
+                );
+            };
             // Every accepted iteration crosses the channel as it happens.
             // The viewer draws the pose it carries, so the source moves
             // while the solver is still working rather than jumping once

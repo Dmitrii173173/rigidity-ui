@@ -4,6 +4,8 @@ mod app;
 mod bench;
 mod commands;
 mod engine;
+mod field;
+mod histogram;
 mod render;
 mod spectrum;
 mod theme;

@@ -29,7 +29,7 @@ without stage 2 has nowhere to put its scans.
 | M6 — Packaging | **done** | `.app` bundle, generated icon, CI (needs a remote) |
 | **Stage 2 — the workbench** | | |
 | W1 — Many clouds | **done** | scene list, roles as chips, one buffer per cloud |
-| W2 — Scalar fields | not started | ramps, histogram, cloud-to-cloud distance |
+| W2 — Scalar fields | **done** | ramps, histogram, cloud-to-cloud distance |
 | W3 — Selection and geometry | not started | crop, cross-section, measure, subsample |
 | W4 — Manual alignment | not started | point-pair picking; the answer to a wrong basin |
 | W5 — Formats | not started | LAS/LAZ, E57, PCD, export |
@@ -195,6 +195,8 @@ rigidity-ui/
       session.rs          # ✓ the pipeline call sequence, and the parity test
     bench.rs              # ✓ frame times and screenshots, for the gates
     commands.rs           # ✓ the ⌘K list
+    field.rs              # ✓ a scalar per point, its range and its clamps
+    histogram.rs          # ✓ the distribution and the two handles
     spectrum.rs           # ✓ the six σ rows and their threshold lines
     timeline.rs           # ✓ the iteration strip and its residual curve
     render/
@@ -816,15 +818,50 @@ alignment (W4), and a per-cloud point size is worth having when there is a
 scene where one cloud is ten times denser than another, which is W5's
 problem.
 
-**W2 — Scalar fields.** One scalar per point, a ramp, and a histogram whose
-handles clamp the ramp without touching the data. The fields that feed it:
-height, intensity from LAS, residual after registration, the `|n·v|`
-contribution of §5, and **cloud-to-cloud distance** — the nearest-neighbour
-distance from each point of one cloud to another, which is CloudCompare's
-single most-used number and is three lines against a `KdTree` we already
-build.
-*Gate:* C2C between the demo corridor pair reproduces the known offset;
-moving a histogram clamp changes the ramp and provably not the values.
+**W2 — Scalar fields. Done.** One representation for every number the
+application computes about a cloud — height, a column the file carried, the
+residual, the distance to another cloud — and therefore one histogram, one
+pair of clamps and one shader path instead of a special case per quantity.
+*Gate: passed, with the first clause restated to be checkable.* "C2C
+reproduces the known offset" is not quite a claim about a corridor: the
+offset there is partly *along* the corridor, and a distance between
+surfaces cannot see that component at all. The test instead lifts a plane
+along its own normal, where every point's nearest neighbour is exactly the
+lift away, and requires the median within five percent. It also requires
+the median to be **at least** the lift — the nearest sample is a sample and
+not a foot of the perpendicular, so it sits `√(lift² + spacing²)` away,
+about two percent over at these densities. The second clause is a test that
+clamps a field and asserts the values are the same `Arc`, with the same
+contents and the same histogram.
+
+The corridor is still where the feature justifies itself, though not as a
+test: measured *before* a registration its histogram is unmistakably
+**bimodal**, a hump at 0.01 and another at 0.03 — the floor displaced in z
+and the walls in x, with the 0.02 along the corridor contributing nothing
+because a surface cannot see a slide along itself. Measured after, one hump
+at the noise floor. The picture states the whole problem the project is
+about, from a number that has nothing to do with conditioning.
+
+Three things this milestone found, none of them predicted:
+
+- **A measurement cancelled the registration.** One counter decided which
+  request was still wanted, so asking a second question abandoned the
+  first. Requests now supersede within a *lane* — reports in one,
+  measurements in the other — because they are different questions and
+  answering one is no reason to stop answering the other.
+- **The distance was measured at the wrong pose.** Computed where the
+  clouds were loaded, then painted on a cloud drawn where the solver put
+  it: the colours described somewhere the points no longer were. It is
+  measured at the current pose now, and a registration landing mid-flight
+  re-asks the question — including for a measurement still running, which
+  was the case the first fix missed.
+- **The tests were racing over a fixture.** Two of them wrote the same file
+  in the temporary directory, and a third read it half-written and failed
+  as a truncated PLY. Each has its own name now.
+
+Not built: reading LAS, and with it intensity. The path is generic —
+anything in `PointCloud::attributes` appears in the picker by name — so
+intensity arrives with the format at W5 and needs nothing here.
 
 **W3 — Selection and geometry.** Box and lasso selection in screen space,
 keep or delete producing a *new* cloud; a cross-section as two clipping

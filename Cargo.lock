@@ -2959,6 +2959,7 @@ dependencies = [
  "rigidity-io",
  "rigidity-pipeline",
  "rigidity-scenes",
+ "rigidity-spatial",
 ]
 
 [[package]]

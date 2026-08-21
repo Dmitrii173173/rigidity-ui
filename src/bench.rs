@@ -38,6 +38,9 @@ pub(crate) struct Bench {
     phase: Option<f64>,
     /// Whether to open the command list, so that it can be looked at.
     commands: bool,
+    /// A scalar field to colour the first cloud by, named as the picker
+    /// names it.
+    field: Option<String>,
     seconds: f32,
     /// Coordinate uploads so far. One per cloud is the claim W1 makes.
     uploads: Option<u64>,
@@ -59,6 +62,7 @@ impl Bench {
                 .ok()
                 .and_then(|value| value.parse().ok()),
             commands: std::env::var("RIGIDITY_UI_COMMANDS").is_ok(),
+            field: std::env::var("RIGIDITY_UI_FIELD").ok(),
             uploads: None,
             seconds,
             started: None,
@@ -71,6 +75,11 @@ impl Bench {
     /// Whether the command list should be showing.
     pub(crate) fn commands(&self) -> bool {
         self.commands
+    }
+
+    /// The field to colour by, taken once.
+    pub(crate) fn take_field(&mut self) -> Option<String> {
+        self.field.take()
     }
 
     /// Which σ row to pretend the pointer is on.

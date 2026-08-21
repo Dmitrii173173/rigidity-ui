@@ -18,16 +18,17 @@ use rigidity_core::icp::IterationReport;
 use rigidity_core::lie::Se3;
 use rigidity_core::nalgebra as na;
 use rigidity_core::observability::{Analysis, Conditioning, ObservabilityCriteria};
-use rigidity_pipeline::{PipelineError, PrepareParams, Progress, RegisterParams, ReportParams};
+use rigidity_pipeline::{PipelineError, PrepareParams, RegisterParams, ReportParams};
 
 use crate::bench::Bench;
 use crate::commands::{Command, Commands};
 use crate::engine::session::{Registration, Surface};
-use crate::engine::{Demo, Engine, Event, Held};
+use crate::engine::{Demo, Engine, Event, Held, Step};
+use crate::field::{self, Field, Source};
 use crate::render::camera::Camera;
 use crate::render::{self, CloudDraw, ViewportCallback};
 use crate::theme::{self, Mode, Palette, space};
-use crate::{spectrum, timeline};
+use crate::{histogram, spectrum, timeline};
 
 /// A cloud in the scene.
 ///
@@ -48,6 +49,11 @@ struct Entry {
     seconds: f64,
     /// Hidden entries keep their place, their colour and their buffers.
     visible: bool,
+    /// The scalar it is currently coloured by, if any.
+    field: Option<Field>,
+    /// Bumped whenever those values change — not when a clamp moves, which
+    /// is a uniform and not an upload.
+    field_version: u64,
     /// Its position in the colour series, fixed when it was loaded so that
     /// removing an earlier cloud does not recolour the rest.
     tint: usize,
@@ -72,8 +78,19 @@ impl Entry {
 /// What the engine is doing for us.
 enum Work {
     Idle,
-    Running { id: u64, progress: Option<Progress> },
+    Running { id: u64, step: Option<Step> },
     Cancelled,
+}
+
+/// A distance field on its way.
+#[derive(Debug, Clone, Copy)]
+struct Measuring {
+    /// The request, so late answers to earlier questions can be ignored.
+    request: u64,
+    /// Which cloud it is about, so a registration finishing mid-flight can
+    /// ask the question again at the pose it just found.
+    entry: u64,
+    step: Option<Step>,
 }
 
 /// What it has produced.
@@ -111,6 +128,12 @@ pub(crate) struct App {
     reading: Option<PathBuf>,
     failure: Option<PipelineError>,
     work: Work,
+    /// A distance field being computed, and how far it has got.
+    ///
+    /// Separate from `work` because the two are different questions: a
+    /// measurement running is no reason to stop reporting, and a report
+    /// running is no reason to stop measuring.
+    measuring: Option<Measuring>,
     outcome: Outcome,
     commands: Commands,
     /// The theme the context was last told about.
@@ -126,6 +149,11 @@ pub(crate) struct App {
     answered: u64,
     /// Which σ row the pointer is on.
     hovered: Option<usize>,
+    /// Which entry's display controls are open.
+    ///
+    /// One at a time: five clouds each showing a picker and a histogram is
+    /// a wall, and only one of them is ever being adjusted.
+    selected: Option<u64>,
     /// `|n·v|` per point for the hovered row, and the ramp it wants.
     contribution: Option<Contribution>,
     /// Every accepted iteration of the last run, in order.
@@ -162,12 +190,14 @@ impl App {
             reading: None,
             failure: None,
             work: Work::Idle,
+            measuring: None,
             outcome: Outcome::Nothing,
             commands: Commands::default(),
             applied: mode,
             clipboard: None,
             answered: 0,
             hovered: None,
+            selected: None,
             contribution: None,
             iterations: Vec::new(),
             scrub: 0,
@@ -383,6 +413,8 @@ impl App {
                         max: max.into(),
                         seconds,
                         visible: true,
+                        field: None,
+                        field_version: 0,
                         tint: self.entries.len(),
                     };
                     // The first cloud is the one to register *against*,
@@ -406,12 +438,24 @@ impl App {
 
                 // Answers to questions that are no longer being asked are
                 // dropped here rather than checked for everywhere below.
-                Event::Working { id, progress } => {
+                Event::Working { id, step } => {
                     if self.current() == Some(id) {
                         self.work = Work::Running {
                             id,
-                            progress: Some(progress),
+                            step: Some(step),
                         };
+                    } else if let Some(measuring) = &mut self.measuring
+                        && measuring.request == id
+                    {
+                        measuring.step = Some(step);
+                    }
+                }
+                Event::Measured { id, entry, values } => {
+                    if self.measuring.is_some_and(|running| running.request == id) {
+                        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == entry) {
+                            entry.field = Some(Field::new(Source::Distance, values));
+                        }
+                        self.measuring = None;
                     }
                 }
                 Event::Iteration { id, report } => {
@@ -447,11 +491,17 @@ impl App {
                         self.outcome = Outcome::Registration { outcome, seconds };
                         self.answered += 1;
                         self.work = Work::Idle;
+                        // A distance measured at the old pose describes
+                        // somewhere the cloud no longer is.
+                        self.remeasure();
                     }
                 }
                 Event::Abandoned { id } => {
                     if self.current() == Some(id) {
                         self.work = Work::Cancelled;
+                    }
+                    if self.measuring.is_some_and(|running| running.request == id) {
+                        self.measuring = None;
                     }
                 }
 
@@ -520,7 +570,94 @@ impl App {
             }
             _ => return,
         };
-        self.work = Work::Running { id, progress: None };
+        self.work = Work::Running { id, step: None };
+    }
+
+    /// What an entry can be coloured by, given what is loaded and what has
+    /// been computed.
+    fn sources_for(&self, entry: &Entry) -> Vec<Source> {
+        let mut sources = vec![Source::Height];
+        sources.extend(
+            entry
+                .cloud
+                .attributes()
+                .iter()
+                .map(|attribute| Source::Attribute(attribute.name.clone())),
+        );
+        if self.target_id.is_some() && self.target_id != Some(entry.id) {
+            sources.push(Source::Distance);
+        }
+        if self.source_id == Some(entry.id) && matches!(self.outcome, Outcome::Registration { .. })
+        {
+            sources.push(Source::Residual);
+        }
+        sources
+    }
+
+    /// Recomputes any distance field, at whatever pose is current.
+    ///
+    /// A measurement still in flight counts: it was asked at the pose that
+    /// held when it started, and a registration finishing since has moved
+    /// the cloud out from under its answer.
+    fn remeasure(&mut self) {
+        let mut stale: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .field
+                    .as_ref()
+                    .is_some_and(|field| field.source == Source::Distance)
+            })
+            .map(|entry| entry.id)
+            .collect();
+        if let Some(measuring) = self.measuring
+            && !stale.contains(&measuring.entry)
+        {
+            stale.push(measuring.entry);
+        }
+        for id in stale {
+            self.colour_by(id, Some(Source::Distance));
+        }
+    }
+
+    /// Colours an entry by one of them, or by nothing.
+    fn colour_by(&mut self, id: u64, source: Option<Source>) {
+        let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
+            return;
+        };
+        self.entries[index].field_version += 1;
+        let Some(source) = source else {
+            self.entries[index].field = None;
+            return;
+        };
+
+        let values = match &source {
+            Source::Height => Some(field::height(&self.entries[index].cloud)),
+            Source::Attribute(name) => field::attribute(&self.entries[index].cloud, name),
+            Source::Residual => self
+                .surface()
+                .and_then(|surface| surface.residuals.as_ref())
+                .map(|values| values.as_ref().clone()),
+            // The only one that cannot be answered here: a query per point
+            // against an index over another million of them.
+            Source::Distance => {
+                let (Some(from), Some(to)) = (
+                    self.entries.get(index).map(Entry::held),
+                    self.target().map(Entry::held),
+                ) else {
+                    return;
+                };
+                let pose = self.pose();
+                self.measuring = Some(Measuring {
+                    request: self.engine.measure(from, to, pose),
+                    entry: id,
+                    step: None,
+                });
+                return;
+            }
+        };
+        self.entries[index].field = values.map(|values| Field::new(source, values));
     }
 
     /// Asks for a file and queues it.
@@ -629,9 +766,14 @@ impl App {
                 }
             }
             Command::Cancel => {
-                if matches!(self.work, Work::Running { .. }) {
+                // Both lanes: one key, and the person pressing it means
+                // "stop", not "stop the one I was thinking of".
+                if matches!(self.work, Work::Running { .. }) || self.measuring.is_some() {
                     self.engine.cancel();
-                    self.work = Work::Cancelled;
+                    self.measuring = None;
+                    if matches!(self.work, Work::Running { .. }) {
+                        self.work = Work::Cancelled;
+                    }
                 }
             }
             Command::Fit => {
@@ -646,7 +788,17 @@ impl App {
             }
             Command::Copy => self.clipboard = Some(self.command()),
             Command::Theme => self.mode = self.mode.flipped(),
-            Command::Residuals => self.residual_colours = !self.residual_colours,
+            // The residual is a field like any other now; the command is
+            // the shortcut to picking it on the cloud it belongs to.
+            Command::Residuals => {
+                if let Some(id) = self.source_id {
+                    let already = self
+                        .entry(Some(id))
+                        .and_then(|entry| entry.field.as_ref())
+                        .is_some_and(|field| field.source == Source::Residual);
+                    self.colour_by(id, (!already).then_some(Source::Residual));
+                }
+            }
             Command::Clear => {
                 self.entries.clear();
                 self.target_id = None;
@@ -705,6 +857,23 @@ impl eframe::App for App {
         }
         if let Some(text) = self.clipboard.take() {
             ui.ctx().copy_text(text);
+        }
+        // The harness can pick a field, because a picker cannot be clicked
+        // from a shell and an unlooked-at panel is an unverified one.
+        if let Some(name) = self.bench.as_mut().and_then(Bench::take_field)
+            && let Some(entry) = self
+                .entries
+                .iter()
+                .find(|entry| self.target_id != Some(entry.id))
+                .or(self.entries.first())
+        {
+            let id = entry.id;
+            let source = self
+                .sources_for(entry)
+                .into_iter()
+                .find(|source| source.label() == name);
+            self.selected = Some(id);
+            self.colour_by(id, source);
         }
         if let Some(bench) = &mut self.bench {
             bench.step(
@@ -784,16 +953,15 @@ impl App {
             return (palette.medium, format!("reading {}…", file_name(path)));
         }
         match &self.work {
-            Work::Running { progress, .. } => {
-                let text = match progress {
+            Work::Running { step, .. } => {
+                let text = match step {
                     _ if !self.iterations.is_empty() => format!(
                         "iteration {} · rmse {:.2e} m   esc to stop",
                         self.iterations.len(),
                         self.iterations.last().map_or(f64::NAN, |it| it.rmse)
                     ),
-                    Some(Progress { stage, done, total }) if *total > 0 => format!(
-                        "{} · {:.0}%   esc to stop",
-                        stage.label(),
+                    Some(Step { label, done, total }) if *total > 0 => format!(
+                        "{label} · {:.0}%   esc to stop",
                         100.0 * *done as f32 / *total as f32
                     ),
                     _ => "preparing…   esc to stop".to_owned(),
@@ -804,6 +972,18 @@ impl App {
             // preparing; inside the solver it is per accepted iteration.
             Work::Cancelled => return (palette.faint, "stopped".to_owned()),
             Work::Idle => {}
+        }
+        // A measurement only gets the strip when nothing louder is
+        // happening, which is most of the time: it is a second or two.
+        if let Some(Measuring { step, .. }) = &self.measuring {
+            let text = match step {
+                Some(Step { label, done, total }) if *total > 0 => format!(
+                    "{label} · {:.0}%   esc to stop",
+                    100.0 * *done as f32 / *total as f32
+                ),
+                _ => "measuring…   esc to stop".to_owned(),
+            };
+            return (palette.medium, text);
         }
         match &self.outcome {
             Outcome::Registration { outcome, seconds } => (
@@ -933,6 +1113,9 @@ impl App {
 
         let mut toggled = None;
         let mut assigned = None;
+        let mut picked: Option<(u64, Option<Source>)> = None;
+        let mut clamped: Option<(u64, [f32; 2])> = None;
+        let mut open = None;
         for entry in &self.entries {
             let is_target = self.target_id == Some(entry.id);
             let is_source = self.source_id == Some(entry.id);
@@ -955,15 +1138,26 @@ impl App {
                 }
 
                 ui.add_space(space::TIGHT);
-                ui.label(
-                    RichText::new(entry.name())
-                        .color(if entry.visible {
-                            palette.text
-                        } else {
-                            palette.faint
-                        })
-                        .size(12.0),
-                );
+                // The name is also the disclosure: one entry's display
+                // controls at a time, opened where they belong.
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(entry.name())
+                                .color(if entry.visible {
+                                    palette.text
+                                } else {
+                                    palette.faint
+                                })
+                                .size(12.0),
+                        )
+                        .fill(Color32::TRANSPARENT),
+                    )
+                    .on_hover_text("colour it by something")
+                    .clicked()
+                {
+                    open = Some(entry.id);
+                }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     for (label, held, as_source, hint) in [
@@ -1017,9 +1211,76 @@ impl App {
                 .color(palette.muted)
                 .size(11.0),
             );
+
+            if self.selected == Some(entry.id) {
+                let colour = palette.cloud(entry.tint);
+                ui.add_space(space::TIGHT);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("colour").color(palette.faint).size(10.0));
+                    if quiet_button(ui, palette, "flat", "one colour for the whole cloud") {
+                        picked = Some((entry.id, None));
+                    }
+                    for source in self.sources_for(entry) {
+                        let held = entry
+                            .field
+                            .as_ref()
+                            .is_some_and(|field| field.source == source);
+                        let response = ui.add(
+                            egui::Button::new(
+                                RichText::new(source.label()).size(11.0).color(if held {
+                                    palette.text
+                                } else {
+                                    palette.muted
+                                }),
+                            )
+                            .fill(if held {
+                                palette.line
+                            } else {
+                                Color32::TRANSPARENT
+                            }),
+                        );
+                        if response.clicked() {
+                            picked = Some((entry.id, Some(source)));
+                        }
+                    }
+                });
+                if let Some(field) = &entry.field {
+                    ui.add_space(space::TIGHT);
+                    if let Some(clamp) = histogram::show(ui, palette, field, palette.faint, colour)
+                    {
+                        clamped = Some((entry.id, clamp));
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {:.3}…{:.3} {}",
+                            field.source.label(),
+                            field.full[0],
+                            field.full[1],
+                            field.source.unit()
+                        ))
+                        .color(palette.faint)
+                        .size(10.0),
+                    );
+                }
+            }
             ui.add_space(space::ROW);
         }
 
+        if let Some(id) = open {
+            self.selected = (self.selected != Some(id)).then_some(id);
+        }
+        if let Some((id, source)) = picked {
+            self.colour_by(id, source);
+        }
+        if let Some((id, clamp)) = clamped
+            && let Some(field) = self
+                .entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.field.as_mut())
+        {
+            field.set_clamp(clamp[0], clamp[1]);
+        }
         if let Some(id) = toggled
             && let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id)
         {
@@ -1439,40 +1700,20 @@ impl App {
         let origin = self.origin();
         let demonstration = self.demonstration(time);
         let on_source = self.reporting_on_source();
-        let hovering = self.hovered.is_some();
         let pose = self.pose();
         let (target_id, source_id) = (self.target_id, self.source_id);
 
-        // One scalar stream at a time. The hovered direction's
-        // contribution takes precedence over the residual because it is
-        // what the pointer is asking about at this moment; letting go
-        // gives the residual back.
-        let scalar = match (self.hovered, self.residual_colours) {
-            // Dim to teal, not cloud-colour to accent: two blues within a
-            // few percent of each other made the ramp invisible. Points
-            // that hold the direction should light up and the rest recede,
-            // which is the message.
-            (Some(index), _) => self
-                .contribution_for(index)
-                .map(|(values, span)| (values, span, palette.high)),
-            (None, true) => self.surface().and_then(|surface| {
-                surface
-                    .residuals
-                    .as_ref()
-                    .map(|values| (Arc::clone(values), surface.span, palette.low))
-            }),
-            (None, false) => None,
-        };
-        // With a scalar on screen the cloud shown is the one the solver
-        // used, at the density the number was computed for.
-        let sampled = scalar
-            .is_some()
-            .then(|| self.surface().map(|surface| Arc::clone(&surface.cloud)))
-            .flatten();
+        // The hovered direction's contribution outranks whatever a cloud
+        // is otherwise coloured by, because it is what the pointer is
+        // asking about at this moment; letting go gives the colours back.
+        let contribution = self.hovered.and_then(|index| self.contribution_for(index));
+        let sampled = self
+            .surface()
+            .map(|surface| Arc::clone(&surface.cloud))
+            .filter(|_| contribution.is_some() || self.shows_a_sampled_field());
         // Keyed on the answer rather than on the cloud: re-running with a
         // different voxel produces different points from the same file.
         let sampled_generation = (1 << 63) | self.answered;
-        let scalar_generation = self.answered * 8 + self.hovered.map_or(0, |row| row as u64 + 1);
 
         let mut draws = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
@@ -1487,24 +1728,39 @@ impl App {
                 _ => Se3::identity(),
             };
             let reported = (is_source && on_source) || (is_target && !on_source);
-            let coloured = reported.then_some(scalar.as_ref()).flatten();
-
             let colour = palette.cloud(entry.tint);
-            // The cold end of a contribution ramp is not the cloud's own
-            // colour but a fade towards the background: a point that
-            // constrains nothing should look like it.
-            let cold = match (coloured, hovering) {
-                (Some(_), true) => palette.faint,
-                _ => colour,
+
+            // Three ways a cloud can be coloured, in order of who is
+            // asking: the pointer, then the cloud's own field, then
+            // nothing.
+            let painted = match (reported, &contribution, &entry.field) {
+                (true, Some((values, span)), _) => Some((
+                    Arc::clone(values),
+                    *span,
+                    // A point that constrains nothing should look like it,
+                    // so the cold end fades towards the background rather
+                    // than staying the cloud's own colour.
+                    palette.faint,
+                    palette.high,
+                    self.answered * 8 + self.hovered.map_or(0, |row| row as u64 + 1),
+                    true,
+                )),
+                (_, _, Some(field)) => Some((
+                    Arc::clone(&field.values),
+                    field.clamp,
+                    palette.faint,
+                    colour,
+                    (entry.id << 32) | entry.field_version,
+                    field.source.on_sampled(),
+                )),
+                _ => None,
             };
-            let cloud = match (reported, &sampled) {
-                (true, Some(sampled)) => Arc::clone(sampled),
-                _ => Arc::clone(&entry.cloud),
-            };
-            let generation = if reported && sampled.is_some() {
-                sampled_generation
-            } else {
-                entry.id
+
+            let (cloud, generation) = match (&painted, &sampled) {
+                (Some((_, _, _, _, _, true)), Some(sampled)) => {
+                    (Arc::clone(sampled), sampled_generation)
+                }
+                _ => (Arc::clone(&entry.cloud), entry.id),
             };
 
             draws.push(CloudDraw {
@@ -1512,17 +1768,31 @@ impl App {
                 cloud,
                 generation,
                 visible: entry.visible,
-                colour: cold.to_normalized_gamma_f32(),
-                hot: coloured
-                    .map(|(_, _, hot)| *hot)
-                    .unwrap_or(colour)
+                colour: painted
+                    .as_ref()
+                    .map_or(colour, |(_, _, cold, _, _, _)| *cold)
                     .to_normalized_gamma_f32(),
-                scalar: coloured.map(|(values, _, _)| Arc::clone(values)),
-                scalar_generation,
-                range: coloured.map(|(_, span, _)| *span).unwrap_or([0.0, 1.0]),
+                hot: painted
+                    .as_ref()
+                    .map_or(colour, |(_, _, _, hot, _, _)| *hot)
+                    .to_normalized_gamma_f32(),
+                scalar: painted.as_ref().map(|(values, ..)| Arc::clone(values)),
+                scalar_generation: painted.as_ref().map_or(0, |(_, _, _, _, key, _)| *key),
+                range: painted.as_ref().map_or([0.0, 1.0], |(_, span, ..)| *span),
             });
         }
         draws
+    }
+
+    /// Whether anything on screen is coloured by a field that belongs to
+    /// the solver's downsampled cloud rather than to a loaded one.
+    fn shows_a_sampled_field(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            entry
+                .field
+                .as_ref()
+                .is_some_and(|field| field.source.on_sampled())
+        })
     }
 
     /// Mouse and wheel over the viewport.

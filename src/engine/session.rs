@@ -18,7 +18,12 @@ use rigidity_pipeline::{
     analyse_registration, prepare_cloud_observed, register_pair_observed,
 };
 
+use rigidity_spatial::KdTree;
+
 use super::job::Held;
+
+/// How many points are measured between two progress reports.
+const DISTANCE_CHUNK: usize = 8_192;
 
 /// A prepared surface, and what it was prepared from.
 struct Slot {
@@ -38,6 +43,12 @@ struct Slot {
 pub(crate) struct Session {
     source: Option<Slot>,
     target: Option<Slot>,
+    /// A full-density index over whatever was last measured against.
+    ///
+    /// Separate from the prepared surfaces because it indexes every point,
+    /// not the downsampled ones: a distance quoted about a voxel grid
+    /// understates the real one by however coarse the grid was.
+    reference: Option<(u64, KdTree)>,
 }
 
 /// The surface a report is about, as the solver saw it.
@@ -58,9 +69,11 @@ pub(crate) struct Surface {
     pub(crate) normals: Arc<Vec<[f32; 3]>>,
     /// The absolute point-to-plane residual, when there has been a
     /// registration to have one.
+    ///
+    /// Where its ramp should start and end is not decided here: that is a
+    /// question about how to look at the numbers, and it belongs with the
+    /// histogram that shows them.
     pub(crate) residuals: Option<Arc<Vec<f32>>>,
-    /// Where the residual ramp should start and end.
-    pub(crate) span: [f32; 2],
 }
 
 /// Everything a finished registration produces.
@@ -112,7 +125,6 @@ impl Session {
                 cloud: Arc::new(prepared.cloud.clone()),
                 normals: Arc::new(normals),
                 residuals: None,
-                span: [0.0, 1.0],
             },
         )))
     }
@@ -164,7 +176,7 @@ impl Session {
         }
 
         let analysis = analyse_registration(moving, fixed, &result.pose, params)?;
-        let (residuals, normals, span) = matched(moving, fixed, &result.pose, params);
+        let (residuals, normals) = matched(moving, fixed, &result.pose, params);
 
         Ok(Some(Registration {
             result,
@@ -173,10 +185,60 @@ impl Session {
                 cloud: Arc::new(moving.cloud.clone()),
                 normals: Arc::new(normals),
                 residuals: Some(Arc::new(residuals)),
-                span,
             },
             points: [moving.len(), fixed.len()],
         }))
+    }
+}
+
+impl Session {
+    /// The distance from every point of one cloud to the nearest point of
+    /// another.
+    ///
+    /// Cancellation here is per chunk rather than per stage: the loop is
+    /// ours, so there is nothing to wait for.
+    pub(crate) fn distances(
+        &mut self,
+        from: &Held,
+        to: &Held,
+        pose: &Se3,
+        stale: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Option<Vec<f32>>, PipelineError> {
+        if stale() {
+            return Ok(None);
+        }
+        if !self
+            .reference
+            .as_ref()
+            .is_some_and(|(id, _)| *id == to.generation)
+        {
+            self.reference = Some((to.generation, KdTree::build(&to.cloud)?));
+        }
+        let (_, tree) = self.reference.as_ref().expect("just built");
+
+        let count = from.cloud.len();
+        let mut values = Vec::with_capacity(count);
+        let mut found = Vec::with_capacity(1);
+        for index in 0..count {
+            if index.is_multiple_of(DISTANCE_CHUNK) {
+                if stale() {
+                    return Ok(None);
+                }
+                progress(index, count);
+            }
+            tree.knn_into(
+                &pose.transform_point(&from.cloud.point(index)),
+                1,
+                &mut found,
+            );
+            values.push(match found.first() {
+                Some(nearest) => nearest.distance_squared.sqrt() as f32,
+                None => f32::NAN,
+            });
+        }
+        progress(count, count);
+        Ok(Some(values))
     }
 }
 
@@ -210,15 +272,12 @@ fn prepare(
 /// direction computable later, on the viewer's side, without another
 /// journey through the index.
 ///
-/// The residual ramp ends at the 95th percentile rather than the maximum:
-/// one outlier at fifty times the median would otherwise flatten every
-/// real difference into the first pixel of the ramp.
 fn matched(
     moving: &Prepared,
     fixed: &Prepared,
     pose: &Se3,
     params: &RegisterParams,
-) -> (Vec<f32>, Vec<[f32; 3]>, [f32; 2]) {
+) -> (Vec<f32>, Vec<[f32; 3]>) {
     let limit = params.max_distance * params.max_distance;
     let mut found = Vec::with_capacity(1);
     let mut residuals = Vec::with_capacity(moving.cloud.len());
@@ -246,14 +305,7 @@ fn matched(
         }
     }
 
-    let mut sorted = residuals.clone();
-    sorted.sort_by(f32::total_cmp);
-    let percentile = sorted
-        .get((sorted.len().saturating_sub(1)) * 95 / 100)
-        .copied()
-        .unwrap_or(1.0)
-        .max(1e-6);
-    (residuals, normals, [0.0, percentile])
+    (residuals, normals)
 }
 
 #[cfg(test)]
@@ -291,7 +343,12 @@ mod tests {
     }
 
     /// A corridor, and the same corridor moved by a known amount.
-    fn corridor_pair() -> (PathBuf, PathBuf, Scene) {
+    ///
+    /// The tag keeps two tests from writing the same file: they run in
+    /// parallel, and a fixture half-written by one and read by another
+    /// fails as a truncated PLY, which is a confusing way to be told about
+    /// a race.
+    fn corridor_pair(tag: &str) -> (PathBuf, PathBuf, Scene) {
         let scene = Scene::generate(
             SceneKind::Corridor,
             SceneParams {
@@ -303,8 +360,8 @@ mod tests {
         let motion = Se3::exp(&na::Vector6::new(0.03, 0.02, 0.01, 0.0, 0.0, 0.0));
         let moved = transform_cloud(&scene.cloud, &motion);
 
-        let target = std::env::temp_dir().join("rigidity-ui-parity-target.ply");
-        let source = std::env::temp_dir().join("rigidity-ui-parity-source.ply");
+        let target = std::env::temp_dir().join(format!("rigidity-ui-{tag}-target.ply"));
+        let source = std::env::temp_dir().join(format!("rigidity-ui-{tag}-source.ply"));
         rigidity_io::write_ply(&scene.cloud, &target).expect("the target could not be written");
         rigidity_io::write_ply(&moved, &source).expect("the source could not be written");
         (source, target, scene)
@@ -321,7 +378,7 @@ mod tests {
     /// detect.
     #[test]
     fn the_analysis_matches_the_command_line() {
-        let (_, target, _) = corridor_pair();
+        let (_, target, _) = corridor_pair("analysis");
         let prepare = PrepareParams::default();
         let report = ReportParams::default();
 
@@ -366,7 +423,7 @@ mod tests {
     /// nobody could act on.
     #[test]
     fn the_registration_matches_the_command_line() {
-        let (source, target, _) = corridor_pair();
+        let (source, target, _) = corridor_pair("registration");
         let prepare = PrepareParams::default();
         let params = RegisterParams::default();
         let report = ReportParams::default();
@@ -436,7 +493,7 @@ mod tests {
     /// A cancellation returns nothing rather than a half-finished answer.
     #[test]
     fn a_cancelled_request_produces_no_result() {
-        let (_, target, _) = corridor_pair();
+        let (_, target, _) = corridor_pair("cancelled");
         let mut session = Session::default();
         let held = Held {
             cloud: Arc::new(rigidity_io::read_ply(&target).expect("the fixture would not read")),
@@ -444,6 +501,89 @@ mod tests {
         };
         let outcome = session
             .analyse(&held, &PrepareParams::default(), &|| true, &mut |_| {})
+            .expect("a cancellation is not a failure");
+        assert!(outcome.is_none());
+    }
+
+    /// Cloud-to-cloud distance measures the gap between two surfaces.
+    ///
+    /// A plane, and the same plane lifted along its own normal: every
+    /// point's nearest neighbour on the other one is then that lift away,
+    /// whatever the sampling did — which makes this the one arrangement
+    /// where the answer is known exactly rather than approximately.
+    ///
+    /// The measured median sits a little *over* the lift, and should: the
+    /// nearest neighbour is a sample, not a foot of the perpendicular, so
+    /// it is `√(lift² + spacing²)` away. At a five-centimetre lift and a
+    /// centimetre of spacing that is two percent, which is why the
+    /// tolerance is five and not one.
+    #[test]
+    fn distance_measures_the_gap_between_two_surfaces() {
+        const LIFT: f64 = 0.05;
+
+        let scene = Scene::generate(
+            SceneKind::Plane,
+            SceneParams {
+                points_per_face: 40_000,
+                noise_sigma: 0.0,
+                outlier_ratio: 0.0,
+                ..SceneParams::default()
+            },
+        );
+        let lifted = transform_cloud(
+            &scene.cloud,
+            &Se3::exp(&na::Vector6::new(0.0, 0.0, LIFT, 0.0, 0.0, 0.0)),
+        );
+
+        let mut session = Session::default();
+        let values = session
+            .distances(
+                &Held {
+                    cloud: Arc::new(lifted),
+                    generation: 1,
+                },
+                &Held {
+                    cloud: Arc::new(scene.cloud),
+                    generation: 2,
+                },
+                &Se3::identity(),
+                &|| false,
+                &mut |_, _| {},
+            )
+            .expect("the measurement failed")
+            .expect("the measurement was abandoned with nothing to abandon it");
+
+        let mut sorted = values.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median = f64::from(sorted[sorted.len() / 2]);
+        assert!(
+            (median - LIFT).abs() < LIFT * 0.05,
+            "a plane lifted by {LIFT} m measured {median} m away"
+        );
+        assert!(
+            median >= LIFT,
+            "the nearest sample cannot be closer than the surface it is on"
+        );
+    }
+
+    /// A cancelled measurement returns nothing rather than a short vector.
+    #[test]
+    fn a_cancelled_measurement_produces_no_result() {
+        let (_, target, _) = corridor_pair("cancelled-measurement");
+        let cloud = Arc::new(rigidity_io::read_ply(&target).expect("the fixture would not read"));
+        let held = Held {
+            cloud,
+            generation: 1,
+        };
+        let mut session = Session::default();
+        let outcome = session
+            .distances(
+                &held.clone(),
+                &held,
+                &Se3::identity(),
+                &|| true,
+                &mut |_, _| {},
+            )
             .expect("a cancellation is not a failure");
         assert!(outcome.is_none());
     }

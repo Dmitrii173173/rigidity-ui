@@ -16,6 +16,32 @@ use rigidity_core::lie::Se3;
 use rigidity_core::observability::Analysis;
 use rigidity_pipeline::{PipelineError, PrepareParams, Progress, RegisterParams};
 
+/// How far along a piece of work is, in the viewer's own terms.
+///
+/// The pipeline's `Progress` names the stages the pipeline has; a distance
+/// computation is none of them, and adding a variant upstream for
+/// something the pipeline does not do would be the wrong way round. One
+/// label and a fraction covers both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Step {
+    /// What is happening.
+    pub(crate) label: &'static str,
+    /// How much of it is finished.
+    pub(crate) done: usize,
+    /// How much there is.
+    pub(crate) total: usize,
+}
+
+impl From<Progress> for Step {
+    fn from(progress: Progress) -> Self {
+        Self {
+            label: progress.stage.label(),
+            done: progress.done,
+            total: progress.total,
+        }
+    }
+}
+
 use super::session::{Registration, Surface};
 
 /// Which built-in scene to generate.
@@ -56,6 +82,34 @@ pub(crate) struct Held {
     pub(crate) generation: u64,
 }
 
+/// Which queue a request belongs to.
+///
+/// Requests supersede each other *within* a lane and not across them. One
+/// counter for everything meant that colouring a cloud by its distance to
+/// another abandoned the registration that was still running — two
+/// different questions, and answering the second is no reason to stop
+/// answering the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// Anything that ends in a conditioning report.
+    Report,
+    /// Anything that ends in a scalar field.
+    Measure,
+}
+
+impl Lane {
+    /// Its slot in the engine's table of wanted requests.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Report => 0,
+            Self::Measure => 1,
+        }
+    }
+
+    /// How many there are.
+    pub(crate) const COUNT: usize = 2;
+}
+
 /// Work for the engine.
 pub(crate) enum Job {
     /// Read a point cloud from disk.
@@ -74,6 +128,27 @@ pub(crate) enum Job {
         target: Held,
         /// How to prepare it first.
         prepare: PrepareParams,
+    },
+    /// Measure how far each point of one cloud is from another.
+    ///
+    /// At full density, both sides: this is the number people quote about
+    /// two scans, and quoting it about a downsampled copy would understate
+    /// it by however coarse the voxel was.
+    Distance {
+        /// Which request this is.
+        id: u64,
+        /// The cloud being measured.
+        from: Held,
+        /// What it is measured against.
+        to: Held,
+        /// Where `from` sits when the question is asked.
+        ///
+        /// After a registration that is the pose the solver found, because
+        /// the distance people want is the one that is left *after*
+        /// aligning — and because the cloud on screen has moved, and
+        /// colours painted at its old position would be describing
+        /// somewhere it no longer is.
+        pose: Se3,
     },
     /// Register one surface onto another and report what the answer is worth.
     Register {
@@ -123,7 +198,16 @@ pub(crate) enum Event {
         /// Which request.
         id: u64,
         /// How far it has got.
-        progress: Progress,
+        step: Step,
+    },
+    /// A distance field arrived.
+    Measured {
+        /// Which request.
+        id: u64,
+        /// Which cloud the values belong to.
+        entry: u64,
+        /// One distance per point of it, metres.
+        values: Vec<f32>,
     },
     /// An accepted ICP iteration.
     ///
