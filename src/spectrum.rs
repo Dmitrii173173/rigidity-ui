@@ -42,6 +42,7 @@ pub(crate) fn show(
     palette: &Palette,
     conditioning: &Conditioning,
     criteria: &ObservabilityCriteria,
+    trusted: bool,
 ) -> Option<usize> {
     let spreads = conditioning.uncertainty(criteria.noise_sigma);
     let states = conditioning.classify(criteria);
@@ -112,7 +113,17 @@ pub(crate) fn show(
     for index in 0..6 {
         let middle = bars.top() + ROW * (index as f32 + 0.5);
         let colour = colour_of(palette, states[index]);
-        let emphasis = if hovered == Some(index) { 1.0 } else { 0.85 };
+        // A spectrum computed at a pose that may be the wrong minimum
+        // is drawn faint. Conditioning describes the shape of the cost
+        // function around wherever the solver stopped; it has nothing to
+        // say about whether that was the right place, and a confident
+        // picture would be a lie of exactly the kind this project exists
+        // to prevent.
+        let emphasis = match (trusted, hovered == Some(index)) {
+            (false, _) => 0.35,
+            (true, true) => 1.0,
+            (true, false) => 0.85,
+        };
 
         painter.text(
             pos2(rect.left(), middle),

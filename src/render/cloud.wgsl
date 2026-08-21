@@ -12,7 +12,6 @@
 
 struct Frame {
     view_projection: mat4x4<f32>,
-    point_colour: vec4<f32>,
     // Viewport size in physical pixels.
     viewport: vec2<f32>,
     point_size: f32,
@@ -20,12 +19,27 @@ struct Frame {
     edl_radius: f32,
 };
 
+// One cloud's placement and colouring. A registration moves the source by
+// writing sixty-four bytes here; the points themselves never move.
+struct Draw {
+    model: mat4x4<f32>,
+    colour: vec4<f32>,
+    hot: vec4<f32>,
+    low: f32,
+    high: f32,
+    // Zero draws every point in `colour`; one ramps from `colour` to `hot`
+    // across the scalar stream.
+    ramp: f32,
+};
+
 @group(0) @binding(0) var<uniform> frame: Frame;
+@group(1) @binding(0) var<uniform> draw: Draw;
 
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     // Position within the splat, in [-1, 1].
     @location(0) offset: vec2<f32>,
+    @location(1) tint: vec4<f32>,
 };
 
 @vertex
@@ -34,6 +48,7 @@ fn vertex_main(
     @location(0) x: f32,
     @location(1) y: f32,
     @location(2) z: f32,
+    @location(3) scalar: f32,
 ) -> VertexOut {
     // Triangle strip: 0 = (-1,-1), 1 = (+1,-1), 2 = (-1,+1), 3 = (+1,+1).
     let offset = vec2<f32>(
@@ -41,7 +56,7 @@ fn vertex_main(
         select(-1.0, 1.0, (corner & 2u) == 2u),
     );
 
-    var clip = frame.view_projection * vec4<f32>(x, y, z, 1.0);
+    var clip = frame.view_projection * draw.model * vec4<f32>(x, y, z, 1.0);
 
     // Multiplying by w cancels the perspective divide that follows, so a
     // splat keeps its size in pixels however far away its point is. Points
@@ -50,9 +65,16 @@ fn vertex_main(
     let half_size = offset * frame.point_size / frame.viewport * clip.w;
     clip = vec4<f32>(clip.xy + half_size, clip.z, clip.w);
 
+    var tint = draw.colour;
+    if (draw.ramp > 0.5) {
+        let span = max(draw.high - draw.low, 1e-9);
+        tint = mix(draw.colour, draw.hot, clamp((scalar - draw.low) / span, 0.0, 1.0));
+    }
+
     var out: VertexOut;
     out.clip = clip;
     out.offset = offset;
+    out.tint = tint;
     return out;
 }
 
@@ -63,5 +85,5 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (dot(in.offset, in.offset) > 1.0) {
         discard;
     }
-    return frame.point_colour;
+    return in.tint;
 }

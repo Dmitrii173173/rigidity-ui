@@ -16,12 +16,14 @@ use std::thread;
 use std::time::Instant;
 
 use rigidity_core::PointCloud;
-use rigidity_pipeline::PipelineError;
+use rigidity_core::icp::IterationReport;
+use rigidity_core::lie::Se3;
+use rigidity_pipeline::{PipelineError, PrepareParams, RegisterParams};
 
 pub(crate) mod job;
 pub(crate) mod session;
 
-pub(crate) use job::{Event, Job};
+pub(crate) use job::{Event, Held, Job};
 use session::Session;
 
 /// A handle to the worker thread.
@@ -75,29 +77,50 @@ impl Engine {
         self.send(Job::Load(path));
     }
 
-    /// Queues an analysis, superseding any earlier one.
+    /// Queues an analysis, superseding any earlier request.
     ///
     /// Returns the identifier: events carry it, and the application ignores
     /// answers to questions it has stopped asking.
-    pub(crate) fn analyse(
+    pub(crate) fn analyse(&mut self, target: Held, prepare: PrepareParams) -> u64 {
+        let id = self.issue();
+        self.send(Job::Analyse {
+            id,
+            target,
+            prepare,
+        });
+        id
+    }
+
+    /// Queues a registration, superseding any earlier request.
+    pub(crate) fn register(
         &mut self,
-        cloud: Arc<PointCloud>,
-        params: rigidity_pipeline::PrepareParams,
+        source: Held,
+        target: Held,
+        prepare: PrepareParams,
+        params: RegisterParams,
+        initial: Se3,
     ) -> u64 {
+        let id = self.issue();
+        self.send(Job::Register {
+            id,
+            source,
+            target,
+            prepare,
+            params,
+            initial,
+        });
+        id
+    }
+
+    fn issue(&mut self) -> u64 {
         self.issued += 1;
         self.wanted.store(self.issued, Ordering::Relaxed);
-        self.send(Job::Analyse {
-            id: self.issued,
-            cloud,
-            params,
-        });
         self.issued
     }
 
     /// Abandons whatever is in flight.
     pub(crate) fn cancel(&mut self) {
-        self.issued += 1;
-        self.wanted.store(self.issued, Ordering::Relaxed);
+        self.issue();
     }
 
     /// Everything reported since the last frame.
@@ -126,7 +149,7 @@ fn run(
             let event = match rigidity_io::read_ply(&path) {
                 Ok(cloud) => Event::Loaded {
                     path,
-                    bounds: local_bounds(&cloud),
+                    bounds: bounds_of(&cloud),
                     cloud: Arc::new(cloud),
                     seconds: start.elapsed().as_secs_f64(),
                 },
@@ -135,16 +158,67 @@ fn run(
             emit(events, ctx, event);
         }
 
-        Job::Analyse { id, cloud, params } => {
+        Job::Analyse {
+            id,
+            target,
+            prepare,
+        } => {
             let start = Instant::now();
             let stale = || wanted.load(Ordering::Relaxed) != id;
             let mut progress = |progress| emit(events, ctx, Event::Working { id, progress });
 
-            let event = match session.analyse(&cloud, &params, &stale, &mut progress) {
+            let event = match session.analyse(&target, &prepare, &stale, &mut progress) {
                 Ok(Some((analysis, points))) => Event::Analysed {
                     id,
                     analysis: Box::new(analysis),
                     points,
+                    seconds: start.elapsed().as_secs_f64(),
+                },
+                Ok(None) => Event::Abandoned { id },
+                Err(error) => Event::Failed(error),
+            };
+            emit(events, ctx, event);
+        }
+
+        Job::Register {
+            id,
+            source,
+            target,
+            prepare,
+            params,
+            initial,
+        } => {
+            let start = Instant::now();
+            let stale = || wanted.load(Ordering::Relaxed) != id;
+            let mut progress = |progress| emit(events, ctx, Event::Working { id, progress });
+            // Every accepted iteration crosses the channel as it happens.
+            // The viewer draws the pose it carries, so the source moves
+            // while the solver is still working rather than jumping once
+            // at the end.
+            let mut iteration = |report: &IterationReport| {
+                emit(
+                    events,
+                    ctx,
+                    Event::Iteration {
+                        id,
+                        report: *report,
+                    },
+                );
+            };
+
+            let event = match session.register(
+                &source,
+                &target,
+                &prepare,
+                &params,
+                initial,
+                &stale,
+                &mut progress,
+                &mut iteration,
+            ) {
+                Ok(Some(outcome)) => Event::Registered {
+                    id,
+                    outcome: Box::new(outcome),
                     seconds: start.elapsed().as_secs_f64(),
                 },
                 Ok(None) => Event::Abandoned { id },
@@ -161,17 +235,11 @@ fn emit(events: &Sender<Event>, ctx: &eframe::egui::Context, event: Event) {
     }
 }
 
-/// The bounding box relative to the cloud's origin.
+/// The bounding box, as an array rather than as `nalgebra` vectors.
 ///
-/// `PointCloud::bounds` answers in absolute coordinates; the renderer and
-/// the camera both work in the local frame, so the origin comes off here
-/// once instead of at every use.
-fn local_bounds(cloud: &PointCloud) -> Option<([f32; 3], [f32; 3])> {
+/// It is a pass over every point, which is exactly the kind of work the
+/// frame loop cannot afford, so it happens here.
+fn bounds_of(cloud: &PointCloud) -> Option<([f64; 3], [f64; 3])> {
     let (min, max) = cloud.bounds()?;
-    let origin = cloud.origin();
-    let local = |v: rigidity_core::nalgebra::Vector3<f64>| {
-        let v = v - origin;
-        [v.x as f32, v.y as f32, v.z as f32]
-    };
-    Some((local(min), local(max)))
+    Some(([min.x, min.y, min.z], [max.x, max.y, max.z]))
 }

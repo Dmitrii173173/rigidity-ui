@@ -1,10 +1,10 @@
 //! The wgpu half of the viewport.
 //!
-//! Two passes. The first draws the cloud into textures of our own — colour
-//! and depth — recorded into the encoder egui hands us, which is submitted
-//! before its own pass. The second reads those two textures, applies
-//! eye-dome lighting and composites the result into egui's target inside
-//! the paint callback.
+//! Two passes. The first draws the clouds into textures of our own —
+//! colour and depth — recorded into the encoder egui hands us, which is
+//! submitted before its own pass. The second reads those two textures,
+//! applies eye-dome lighting and composites the result into egui's target
+//! inside the paint callback.
 //!
 //! The offscreen pair is not an indulgence. egui's render pass carries no
 //! depth attachment, so a cloud drawn directly into it could not depth-test
@@ -28,21 +28,32 @@ pub(crate) mod camera;
 /// point is to put the mantissa where the geometry is.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// Everything both passes need to know about this frame.
+/// What both pipelines need to know about this frame.
 ///
-/// 112 bytes: the trailing padding is what rounds the struct up to the
-/// 16-byte alignment a uniform block must have, and both shaders declare
-/// the same layout.
+/// 96 bytes: the trailing padding is what rounds the struct up to the
+/// 16-byte alignment a uniform block must have.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Frame {
     view_projection: [f32; 16],
-    point_colour: [f32; 4],
     viewport: [f32; 2],
     point_size: f32,
     edl_strength: f32,
     edl_radius: f32,
     _pad: [f32; 3],
+}
+
+/// Where one cloud sits and how it is coloured. 112 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Draw {
+    model: [f32; 16],
+    colour: [f32; 4],
+    hot: [f32; 4],
+    low: f32,
+    high: f32,
+    ramp: f32,
+    _pad: f32,
 }
 
 /// The offscreen pair, and the bind group that reads them back.
@@ -53,17 +64,26 @@ struct Targets {
     bind_group: wgpu::BindGroup,
 }
 
-/// One cloud on the GPU.
+/// One cloud's coordinates on the GPU.
 ///
 /// Three buffers, not one: `PointCloud` keeps x, y and z in separate
-/// arrays, and uploading them as three vertex streams means the coordinates
-/// reach the GPU without a single copy on the way.
-struct Points {
+/// arrays, and uploading them as three vertex streams means the
+/// coordinates reach the GPU without a single copy on the way.
+struct Buffers {
     generation: u64,
     count: u32,
     x: wgpu::Buffer,
     y: wgpu::Buffer,
     z: wgpu::Buffer,
+    scalar: Option<wgpu::Buffer>,
+    scalar_generation: u64,
+}
+
+/// One drawable cloud: its uniform, its bind group and its coordinates.
+struct Slot {
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    buffers: Option<Buffers>,
 }
 
 /// What the viewport keeps between frames.
@@ -73,9 +93,10 @@ struct Resources {
     composite_pipeline: wgpu::RenderPipeline,
     frame_buffer: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
+    draw_layout: wgpu::BindGroupLayout,
     target_layout: wgpu::BindGroupLayout,
     targets: Option<Targets>,
-    points: Option<Points>,
+    slots: Vec<Slot>,
 }
 
 impl Resources {
@@ -129,39 +150,75 @@ impl Resources {
         });
     }
 
-    /// Uploads a cloud, if it is not the one already there.
-    fn ensure_points(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        generation: u64,
-        cloud: &PointCloud,
-    ) {
-        if self
-            .points
-            .as_ref()
-            .is_some_and(|old| old.generation == generation)
-        {
-            return;
-        }
-        let (x, y, z) = cloud.columns();
-        let upload = |label: &str, values: &[f32]| {
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: (size_of::<f32>() * values.len().max(1)) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    /// Makes sure there are as many slots as there are clouds to draw.
+    fn ensure_slots(&mut self, device: &wgpu::Device, wanted: usize) {
+        while self.slots.len() < wanted {
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cloud draw"),
+                size: size_of::<Draw>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(values));
-            buffer
-        };
-        self.points = Some(Points {
-            generation,
-            count: cloud.len() as u32,
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cloud draw"),
+                layout: &self.draw_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            self.slots.push(Slot {
+                uniform,
+                bind_group,
+                buffers: None,
+            });
+        }
+    }
+}
+
+/// Uploads a cloud's coordinates, if they are not the ones already there.
+fn ensure_buffers(slot: &mut Slot, device: &wgpu::Device, queue: &wgpu::Queue, draw: &CloudDraw) {
+    let upload = |label: &str, values: &[f32]| {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (size_of::<f32>() * values.len().max(1)) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(values));
+        buffer
+    };
+
+    if !slot
+        .buffers
+        .as_ref()
+        .is_some_and(|old| old.generation == draw.generation)
+    {
+        let (x, y, z) = draw.cloud.columns();
+        slot.buffers = Some(Buffers {
+            generation: draw.generation,
+            count: draw.cloud.len() as u32,
             x: upload("cloud x", x),
             y: upload("cloud y", y),
             z: upload("cloud z", z),
+            scalar: None,
+            scalar_generation: 0,
         });
+    }
+
+    let Some(buffers) = slot.buffers.as_mut() else {
+        return;
+    };
+    match &draw.scalar {
+        Some(values) if buffers.scalar_generation != draw.scalar_generation => {
+            buffers.scalar = Some(upload("cloud scalar", values));
+            buffers.scalar_generation = draw.scalar_generation;
+        }
+        None => {
+            buffers.scalar = None;
+            buffers.scalar_generation = 0;
+        }
+        _ => {}
     }
 }
 
@@ -176,18 +233,25 @@ pub(crate) fn install(render_state: Option<&RenderState>) -> bool {
     };
     let device = &state.device;
 
+    let uniform_entry = |visibility| wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
     let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("viewport frame"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
+        entries: &[uniform_entry(
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+        )],
+    });
+    let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cloud draw"),
+        entries: &[uniform_entry(wgpu::ShaderStages::VERTEX)],
     });
     let target_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("viewport targets"),
@@ -236,7 +300,7 @@ pub(crate) fn install(render_state: Option<&RenderState>) -> bool {
     });
     let cloud_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cloud"),
-        bind_group_layouts: &[Some(&frame_layout)],
+        bind_group_layouts: &[Some(&frame_layout), Some(&draw_layout)],
         immediate_size: 0,
     });
     // One f32 per stream, one step per point: the vertex index picks the
@@ -247,7 +311,8 @@ pub(crate) fn install(render_state: Option<&RenderState>) -> bool {
         attributes: match location {
             0 => &wgpu::vertex_attr_array![0 => Float32],
             1 => &wgpu::vertex_attr_array![1 => Float32],
-            _ => &wgpu::vertex_attr_array![2 => Float32],
+            2 => &wgpu::vertex_attr_array![2 => Float32],
+            _ => &wgpu::vertex_attr_array![3 => Float32],
         },
     };
     let cloud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -257,7 +322,12 @@ pub(crate) fn install(render_state: Option<&RenderState>) -> bool {
             module: &cloud_shader,
             entry_point: Some("vertex_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[Some(stream(0)), Some(stream(1)), Some(stream(2))],
+            buffers: &[
+                Some(stream(0)),
+                Some(stream(1)),
+                Some(stream(2)),
+                Some(stream(3)),
+            ],
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleStrip,
@@ -330,19 +400,42 @@ pub(crate) fn install(render_state: Option<&RenderState>) -> bool {
         composite_pipeline,
         frame_buffer,
         frame_bind_group,
+        draw_layout,
         target_layout,
         targets: None,
-        points: None,
+        slots: Vec::new(),
     });
     true
 }
 
-/// One frame's worth of viewport state, copied across to the renderer.
-pub(crate) struct ViewportCallback {
-    /// The cloud to draw. Shared, never copied.
+/// One cloud, as the frame wants it drawn.
+pub(crate) struct CloudDraw {
+    /// The points. Shared, never copied.
     pub(crate) cloud: Arc<PointCloud>,
     /// Bumped whenever `cloud` becomes a different cloud.
     pub(crate) generation: u64,
+    /// Where it sits, column-major.
+    ///
+    /// A registration moves a cloud by writing this matrix. The points
+    /// stay where they were uploaded, which is why a two-hundred-iteration
+    /// run costs two hundred uniform writes and no re-uploads at all.
+    pub(crate) model: [f32; 16],
+    /// The colour of a point, or the cold end of the ramp.
+    pub(crate) colour: [f32; 4],
+    /// The hot end of the ramp.
+    pub(crate) hot: [f32; 4],
+    /// One value per point, when there is something to colour by.
+    pub(crate) scalar: Option<Arc<Vec<f32>>>,
+    /// Bumped whenever `scalar` becomes different values.
+    pub(crate) scalar_generation: u64,
+    /// Where the ramp starts and ends.
+    pub(crate) range: [f32; 2],
+}
+
+/// One frame's worth of viewport state, copied across to the renderer.
+pub(crate) struct ViewportCallback {
+    /// What to draw, in the order it should be drawn.
+    pub(crate) draws: Vec<CloudDraw>,
     /// World to clip, column-major, as `nalgebra` already stores it.
     pub(crate) view_projection: [f32; 16],
     /// Viewport size in physical pixels.
@@ -353,8 +446,6 @@ pub(crate) struct ViewportCallback {
     pub(crate) edl_strength: f32,
     /// Its sampling radius in pixels.
     pub(crate) edl_radius: f32,
-    /// The colour of a point, from the theme.
-    pub(crate) point_colour: [f32; 4],
 }
 
 impl CallbackTrait for ViewportCallback {
@@ -370,13 +461,12 @@ impl CallbackTrait for ViewportCallback {
             return Vec::new();
         };
         resources.ensure_targets(device, self.size);
-        resources.ensure_points(device, queue, self.generation, &self.cloud);
+        resources.ensure_slots(device, self.draws.len());
         queue.write_buffer(
             &resources.frame_buffer,
             0,
             bytemuck::bytes_of(&Frame {
                 view_projection: self.view_projection,
-                point_colour: self.point_colour,
                 viewport: [self.size[0] as f32, self.size[1] as f32],
                 point_size: self.point_size,
                 edl_strength: self.edl_strength,
@@ -385,18 +475,32 @@ impl CallbackTrait for ViewportCallback {
             }),
         );
 
-        let (Some(targets), Some(points)) = (&resources.targets, &resources.points) else {
+        for (slot, draw) in resources.slots.iter_mut().zip(&self.draws) {
+            ensure_buffers(slot, device, queue, draw);
+            queue.write_buffer(
+                &slot.uniform,
+                0,
+                bytemuck::bytes_of(&Draw {
+                    model: draw.model,
+                    colour: draw.colour,
+                    hot: draw.hot,
+                    low: draw.range[0],
+                    high: draw.range[1],
+                    ramp: if draw.scalar.is_some() { 1.0 } else { 0.0 },
+                    _pad: 0.0,
+                }),
+            );
+        }
+
+        let Some(targets) = &resources.targets else {
             return Vec::new();
         };
-        if points.count == 0 {
-            return Vec::new();
-        }
 
         // Recorded into egui's own encoder, which is submitted before its
         // render pass — so by the time `paint` runs, these textures hold
-        // this frame's cloud.
+        // this frame's clouds.
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("cloud"),
+            label: Some("clouds"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &targets.colour,
                 depth_slice: None,
@@ -424,11 +528,25 @@ impl CallbackTrait for ViewportCallback {
         });
         pass.set_pipeline(&resources.cloud_pipeline);
         pass.set_bind_group(0, &resources.frame_bind_group, &[]);
-        pass.set_vertex_buffer(0, points.x.slice(..));
-        pass.set_vertex_buffer(1, points.y.slice(..));
-        pass.set_vertex_buffer(2, points.z.slice(..));
-        // Four corners per splat, one instance per point.
-        pass.draw(0..4, 0..points.count);
+        for slot in &resources.slots {
+            let Some(buffers) = &slot.buffers else {
+                continue;
+            };
+            if buffers.count == 0 {
+                continue;
+            }
+            pass.set_bind_group(1, &slot.bind_group, &[]);
+            pass.set_vertex_buffer(0, buffers.x.slice(..));
+            pass.set_vertex_buffer(1, buffers.y.slice(..));
+            pass.set_vertex_buffer(2, buffers.z.slice(..));
+            // With no scalar the stream is still bound — the pipeline
+            // declares four — but the shader ignores it. Pointing it at the
+            // z coordinates costs nothing and saves a second pipeline, a
+            // second shader and a buffer of zeroes per cloud.
+            pass.set_vertex_buffer(3, buffers.scalar.as_ref().unwrap_or(&buffers.z).slice(..));
+            // Four corners per splat, one instance per point.
+            pass.draw(0..4, 0..buffers.count);
+        }
         drop(pass);
 
         Vec::new()
@@ -443,12 +561,9 @@ impl CallbackTrait for ViewportCallback {
         let Some(resources) = resources.get::<Resources>() else {
             return;
         };
-        let (Some(targets), Some(points)) = (&resources.targets, &resources.points) else {
+        let Some(targets) = &resources.targets else {
             return;
         };
-        if points.count == 0 {
-            return;
-        }
         render_pass.set_pipeline(&resources.composite_pipeline);
         render_pass.set_bind_group(0, &resources.frame_bind_group, &[]);
         render_pass.set_bind_group(1, &targets.bind_group, &[]);

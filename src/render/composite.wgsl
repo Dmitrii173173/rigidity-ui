@@ -6,9 +6,13 @@
 // silhouettes from depth alone. It is the cheapest thing that makes a point
 // cloud read as a surface rather than as a fog.
 
+// Must match `Frame` in cloud.wgsl and in mod.rs field for field: one
+// buffer is bound to both pipelines, and wgpu compares the declared size
+// against the buffer's. A field removed from one and not the other is a
+// validation error at the first draw — which is how this comment came to
+// be written.
 struct Frame {
     view_projection: mat4x4<f32>,
-    point_colour: vec4<f32>,
     viewport: vec2<f32>,
     point_size: f32,
     edl_strength: f32,

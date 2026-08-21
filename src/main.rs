@@ -6,6 +6,7 @@ mod engine;
 mod render;
 mod spectrum;
 mod theme;
+mod timeline;
 
 use std::path::PathBuf;
 
@@ -20,9 +21,13 @@ fn main() -> eframe::Result {
         // therefore must not expect either.
         ..Default::default()
     };
-    // One optional argument: a file to open. Anything more belongs to the
-    // CLI, which is a different program with a different job.
-    let open = std::env::args().nth(1).map(PathBuf::from);
+    // Up to two files: the target, then the source. Anything more belongs
+    // to the CLI, which is a different program with a different job.
+    let open: Vec<PathBuf> = std::env::args()
+        .skip(1)
+        .take(2)
+        .map(PathBuf::from)
+        .collect();
     eframe::run_native(
         "rigidity",
         options,

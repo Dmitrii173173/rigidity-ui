@@ -55,6 +55,11 @@ pub(crate) struct Palette {
     pub(crate) faint: Color32,
     /// The one accent. If a second one is ever needed, the layout is wrong.
     pub(crate) accent: Color32,
+    /// The cloud that moves during a registration.
+    ///
+    /// Distinct from [`point`](Self::point) because the whole question on
+    /// screen is which of the two is which, and shading alone cannot say.
+    pub(crate) point_moving: Color32,
     /// An unclassified point in the viewport.
     ///
     /// Not `text`: the viewport is the darker surface in one theme and the
@@ -89,6 +94,7 @@ impl Palette {
                 faint: Color32::from_rgb(0x5A, 0x62, 0x6B),
                 accent: Color32::from_rgb(0x6A, 0xA9, 0xFF),
                 point: Color32::from_rgb(0xC8, 0xCD, 0xD4),
+                point_moving: Color32::from_rgb(0x7C, 0xB0, 0xF0),
                 high: Color32::from_rgb(0x4F, 0xB8, 0xA8),
                 medium: Color32::from_rgb(0xE0, 0xB3, 0x41),
                 low: Color32::from_rgb(0xE5, 0x73, 0x4A),
@@ -103,6 +109,7 @@ impl Palette {
                 faint: Color32::from_rgb(0x93, 0x9B, 0xA5),
                 accent: Color32::from_rgb(0x2C, 0x6F, 0xE0),
                 point: Color32::from_rgb(0x3A, 0x41, 0x4A),
+                point_moving: Color32::from_rgb(0x1E, 0x5F, 0xC8),
                 high: Color32::from_rgb(0x1E, 0x8F, 0x80),
                 medium: Color32::from_rgb(0xA9, 0x76, 0x1A),
                 low: Color32::from_rgb(0xC4, 0x50, 0x2A),

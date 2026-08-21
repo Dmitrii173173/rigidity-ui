@@ -23,7 +23,7 @@ without stage 2 has nowhere to put its scans.
 | M0 — Scaffold | **done** | window, wgpu callback, shell layout, theme |
 | M1 — Cloud rendering | **done** | splats, orbit camera, EDL, 1.05 M at 120 fps |
 | M2 — Pipeline and spectrum | **done** | jobs, cancel, σ panel, parity with the CLI |
-| M3 — Registration | not started | live ICP, iteration timeline |
+| M3 — Registration | **done** | live ICP, timeline, residuals, basin warning |
 | M4 — Null-space visualisation | not started | the feature the app exists for |
 | M5 — Polish | not started | theme, palette, keyboard, errors |
 | M6 — Packaging | not started | `.app` bundle, CI on three OS |
@@ -195,10 +195,11 @@ rigidity-ui/
       session.rs          # ✓ the pipeline call sequence, and the parity test
     bench.rs              # ✓ frame times and screenshots, for the gates
     spectrum.rs           # ✓ the six σ rows and their threshold lines
+    timeline.rs           # ✓ the iteration strip and its residual curve
     render/
       mod.rs              # ✓ pipelines, targets, callback
       camera.rs           # ✓ orbit / pan / dolly, fit-to-bounds
-      cloud.wgsl          # ✓ vertex-pulled splats
+      cloud.wgsl          # ✓ vertex-pulled splats, model matrix, ramp
       composite.wgsl      # ✓ eye-dome lighting and the blit
     panels/               # when there are enough of them to be a directory;
       inspector.rs        # the inspector and the status strip are still
@@ -606,11 +607,57 @@ What the milestone settled beyond its brief:
   repeats position rather than carrying it alone.
 - **A cancelled analysis has a way back**: "run again", and Space.
 
-**M3 — Registration.** `register_observed` streaming into the timeline, live
-pose during the run, residual colouring, RMSE in the status strip.
-*Gate:* pose, RMSE and correspondence count match
-`rigidity register demo/corridor_source.ply demo/corridor_target.ply`
-exactly, asserted in a test.
+**M3 — Registration. Done.** Two clouds with roles, `register_observed`
+streaming every accepted iteration as it happens, the source moving while
+the solver is still working, the iteration strip, residual colouring, and
+the wrong-basin warning.
+*Gate: passed.* The test registers a generated corridor pair through the
+viewer's own path and requires the command line's output to contain the
+viewer's translation line, its RMSE-and-correspondences line and its whole
+conditioning report, formatted exactly as the CLI prints them. Checked by
+mutation: a 0.05 voxel against 0.07 fails it.
+
+What the milestone showed, which is the point of having built it:
+
+> `x −0.0300   y −0.0019   z −0.0100 m`, against a true offset of
+> `−0.03, −0.02, −0.01`. Two axes exact to four decimals and the third
+> wrong by 18 mm — and σ₆, the only bar past the tolerance line, is
+> `ρ = [0, +1, 0]`: translation along the corridor. The README's opening
+> example, on screen, without being told where to look.
+
+Decisions worth recording:
+
+- **A pose change is sixty-four bytes.** Each cloud carries a model matrix;
+  the points never move. A registration that streams two hundred
+  iterations writes two hundred uniforms and re-uploads nothing, which is
+  what makes watching the solver affordable at two million points.
+- **The model matrix folds in the origins.** Each cloud stores `f32`
+  offsets from its own `f64` origin, and the two origins differ. The matrix
+  is built as `pose · (origin_cloud + local) − origin_frame` in `f64` and
+  narrowed once, so a georeferenced pair keeps its millimetres.
+- **Residual colouring is drawn on the downsampled source**, because that
+  is the cloud the solver used. Colouring the full-density source would
+  cost a nearest-neighbour query per raw point to say the same thing, and
+  would quietly imply the residual had been computed there. The panel says
+  which cloud is on screen.
+- **The wrong-basin warning is implemented**, not merely planned: a
+  residual more than three times the stated sensor noise fades the spectrum
+  and says why. Conditioning describes the shape of the cost function
+  around wherever the solver stopped and has nothing to say about whether
+  that was the right place.
+- **Cancellation is now per iteration** where it matters. §7.1's
+  `ControlFlow` earns its keep here: Esc during a solve is answered after
+  the next accepted step rather than after the whole run.
+- **The engine caches prepared surfaces** by cloud generation and
+  parameters. Re-registering after a slider moves does not re-prepare what
+  did not change.
+
+A bug this milestone is worth naming, because the class of it will recur:
+the composite shader kept the old `Frame` layout after a field was removed
+from the cloud shader and from Rust, and wgpu rejected the first draw with
+"bound with size 96 where the shader expects 112". Neither the compiler nor
+the tests could see it — only running the thing could. Two shaders sharing
+one uniform buffer must be edited together, and both files now say so.
 
 **M4 — Null-space visualisation.** Hover-to-oscillate, contribution
 colouring, "copy CLI command", demo scenes from `rigidity-scenes`.
