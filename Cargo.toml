@@ -1,0 +1,38 @@
+[workspace]
+
+[package]
+name        = "rigidity-ui"
+description = "A viewer for rigidity: register two clouds and see which degrees of freedom the geometry determined."
+version      = "0.1.0"
+edition      = "2024"
+# Matches ../rigidity/rust-toolchain.toml. The numbers this shows are
+# produced by the same compiler that produced the ones the CLI prints, or
+# they are not the same numbers.
+rust-version = "1.97"
+license      = "MIT OR Apache-2.0"
+publish      = false
+
+[dependencies]
+# rigidity is unpublished — no remote, nothing on crates.io — so a path
+# dependency is the only way in. Move to a git dependency as soon as the
+# repository has one; see PLAN.md §10.
+rigidity-core     = { path = "../rigidity/crates/rigidity-core" }
+rigidity-pipeline = { path = "../rigidity/crates/rigidity-pipeline" }
+
+# One dependency for the whole UI and GPU stack: eframe re-exports the
+# `egui`, `egui_wgpu` and `wgpu` it was built against, so those three can
+# never drift out of step with each other or with us.
+eframe = "0.36"
+
+# Vertex and uniform structs go to the GPU as bytes.
+bytemuck = { version = "1.25", features = ["derive"] }
+
+[lints.rust]
+unsafe_code     = "forbid"
+unreachable_pub = "warn"
+
+# Numerical code in a debug build is unusable: preparing a million points
+# would take minutes. Dependencies are optimised, our own code is not, so
+# the crate still builds fast and still steps in a debugger.
+[profile.dev.package."*"]
+opt-level = 2

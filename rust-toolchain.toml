@@ -1,0 +1,8 @@
+# Copied from ../rigidity, not inherited: rustup resolves this file by
+# walking up from the current directory, and a sibling folder is not on
+# that path. The pin is the point — this project is about small singular
+# values, and a floating compiler means floating results. The two halves
+# must agree or their numbers are not comparable.
+[toolchain]
+channel    = "1.97.1"
+components = ["clippy", "rustfmt"]
