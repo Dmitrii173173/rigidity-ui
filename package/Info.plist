@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>rigidity</string>
+    <key>CFBundleDisplayName</key>
+    <string>rigidity</string>
+    <!-- Not a claim on a domain nobody owns. It becomes the real
+         reverse-DNS identifier when the project has an address; until then
+         `local.` says plainly that it has none. -->
+    <key>CFBundleIdentifier</key>
+    <string>local.rigidity.viewer</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleExecutable</key>
+    <string>rigidity</string>
+    <key>CFBundleIconFile</key>
+    <string>rigidity</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- No CFBundleDocumentTypes. Declaring .ply here would put the
+         application in "Open With" and on the Dock's drop target, and then
+         nothing would happen: files opened that way arrive as an Apple
+         event, which this application does not answer. Files are dropped on
+         the window. Promising more than that would be a worse lie than
+         promising nothing. -->
+</dict>
+</plist>
