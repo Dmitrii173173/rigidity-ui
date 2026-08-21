@@ -2,6 +2,7 @@
 
 mod app;
 mod bench;
+mod commands;
 mod engine;
 mod render;
 mod spectrum;
@@ -11,10 +12,21 @@ mod timeline;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([880.0, 560.0]);
+    // The content runs to the top of the window and the traffic lights
+    // float over it, which is what a macOS application built in the last
+    // decade looks like. The inspector leaves room for them; see
+    // `app::CHROME_INSET`.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
+
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([880.0, 560.0]),
+        viewport,
         // The defaults are what we want: no multisampling (the viewport
         // does its own antialiasing, and points do not benefit from MSAA)
         // and no depth buffer on egui's own pass, which our callback

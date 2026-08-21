@@ -25,7 +25,7 @@ without stage 2 has nowhere to put its scans.
 | M2 — Pipeline and spectrum | **done** | jobs, cancel, σ panel, parity with the CLI |
 | M3 — Registration | **done** | live ICP, timeline, residuals, basin warning |
 | M4 — Null-space visualisation | **done** | hover to move, |n·v| colouring, demos |
-| M5 — Polish | not started | theme, palette, keyboard, errors |
+| M5 — Polish | **done** | ⌘K, both themes measured, errors, README |
 | M6 — Packaging | not started | `.app` bundle, CI on three OS |
 | **Stage 2 — the workbench** | | |
 | W1 — Many clouds | not started | scene list, visibility, per-cloud display |
@@ -194,6 +194,7 @@ rigidity-ui/
       job.rs              # ✓ Job / Event
       session.rs          # ✓ the pipeline call sequence, and the parity test
     bench.rs              # ✓ frame times and screenshots, for the gates
+    commands.rs           # ✓ the ⌘K list
     spectrum.rs           # ✓ the six σ rows and their threshold lines
     timeline.rs           # ✓ the iteration strip and its residual curve
     render/
@@ -204,7 +205,6 @@ rigidity-ui/
     panels/               # when there are enough of them to be a directory;
       inspector.rs        # the inspector and the status strip are still
       status.rs           # sections of app.rs, and splitting two functions
-      palette.rs          # across two files would be filing, not structure
 ```
 
 `engine/` is still to be written, but its shape is now much smaller than
@@ -702,10 +702,45 @@ pipeline of their own to show the same `v` the swing already shows
 integrated and the colour already shows projected. If a scene ever turns up
 where neither reads, it can be added then.
 
-**M5 — Polish.** Theme, palette, drag and drop, empty states, typed error
-surfaces, full keyboard coverage, README.
-*Gate:* no dialog anywhere displays a bare `String`; every command in the
-palette is reachable without the mouse; both themes pass a contrast check.
+**M5 — Polish. Done.** The command palette, a system-aware theme, a
+failure banner that has room to be read, a drop overlay, empty states that
+say what to do, and the README.
+*Gate: passed on all three counts.*
+
+- **No bare `String` anywhere.** There are no dialogs at all; a failure is
+  a `PipelineError` shown in a banner across the top of the viewport, with
+  the path intact, dismissed by clicking it. Twenty-six pixels of status
+  strip used to truncate exactly the half that mattered.
+- **Every command is reachable without the mouse.** ⌘K opens one list
+  holding everything the application can be asked to do, filtered by
+  typing, chosen with the arrow keys and return. While it is open the
+  application's own shortcuts stand down — `f` is the letter f.
+- **Both themes pass a contrast check**, and the check is a test rather
+  than an opinion. `theme.rs` computes WCAG contrast ratios and asserts
+  that every colour carrying text clears 4.5:1 against the panel, in both
+  themes, and that the clouds clear 3:1 against the viewport and 1.4:1
+  against each other. Five colours failed when it was first run and were
+  re-derived by solving for the threshold rather than by eye — the light
+  theme's σ colours were at 3.6:1, which is the *central number of the
+  application* set in ten-pixel type below the readable limit.
+
+Also settled here:
+
+- **Every action goes through one path.** A button, a shortcut and a
+  palette entry all call `run_command`, so they cannot drift apart. The two
+  things a command cannot do without a `Context` — apply a theme, reach the
+  clipboard — are deferred by a field and performed once in `ui`.
+- **The window is frameless on macOS.** `fullsize_content_view` with the
+  title bar transparent and the title hidden: the content runs to the top
+  and the traffic lights float over it. egui's `with_titlebar_shown(false)`
+  makes the bar transparent rather than removing it, and the buttons are
+  governed by a separate setting left alone, so nothing can become
+  unclosable. The inspector leaves 22 points of room for them, and the name
+  at the top of the panel is the drag handle a missing title bar would
+  otherwise cost.
+- **The theme follows the system** at startup, and `RIGIDITY_UI_THEME`
+  overrides it — which is also how the light theme got looked at without
+  anyone pressing anything.
 
 **M6 — Packaging.** macOS `.app` bundle with an icon and an Info.plist, CI
 building on Linux, macOS and Windows against the pinned toolchain.

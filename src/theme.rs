@@ -19,6 +19,22 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
+    /// What the system is set to, unless told otherwise.
+    ///
+    /// `RIGIDITY_UI_THEME` overrides it, which is how both themes get
+    /// looked at without a person having to press anything.
+    pub(crate) fn initial(ctx: &Context) -> Self {
+        match std::env::var("RIGIDITY_UI_THEME").as_deref() {
+            Ok("light") => return Self::Light,
+            Ok("dark") => return Self::Dark,
+            _ => {}
+        }
+        match ctx.system_theme() {
+            Some(Theme::Light) => Self::Light,
+            _ => Self::Dark,
+        }
+    }
+
     /// The other one.
     pub(crate) fn flipped(self) -> Self {
         match self {
@@ -91,7 +107,7 @@ impl Palette {
                 line: Color32::from_rgb(0x24, 0x28, 0x2D),
                 text: Color32::from_rgb(0xE6, 0xE8, 0xEB),
                 muted: Color32::from_rgb(0x93, 0x9B, 0xA5),
-                faint: Color32::from_rgb(0x5A, 0x62, 0x6B),
+                faint: Color32::from_rgb(0x79, 0x80, 0x87),
                 accent: Color32::from_rgb(0x6A, 0xA9, 0xFF),
                 point: Color32::from_rgb(0xC8, 0xCD, 0xD4),
                 point_moving: Color32::from_rgb(0x7C, 0xB0, 0xF0),
@@ -106,13 +122,13 @@ impl Palette {
                 line: Color32::from_rgb(0xDD, 0xE0, 0xE4),
                 text: Color32::from_rgb(0x16, 0x18, 0x1B),
                 muted: Color32::from_rgb(0x5C, 0x63, 0x6C),
-                faint: Color32::from_rgb(0x93, 0x9B, 0xA5),
-                accent: Color32::from_rgb(0x2C, 0x6F, 0xE0),
+                faint: Color32::from_rgb(0x6A, 0x70, 0x77),
+                accent: Color32::from_rgb(0x2A, 0x6B, 0xD7),
                 point: Color32::from_rgb(0x3A, 0x41, 0x4A),
                 point_moving: Color32::from_rgb(0x1E, 0x5F, 0xC8),
-                high: Color32::from_rgb(0x1E, 0x8F, 0x80),
-                medium: Color32::from_rgb(0xA9, 0x76, 0x1A),
-                low: Color32::from_rgb(0xC4, 0x50, 0x2A),
+                high: Color32::from_rgb(0x1A, 0x7C, 0x6F),
+                medium: Color32::from_rgb(0x93, 0x67, 0x17),
+                low: Color32::from_rgb(0xBA, 0x4C, 0x28),
             },
         }
     }
@@ -228,4 +244,86 @@ fn visuals(mode: Mode, palette: &Palette) -> Visuals {
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, palette.text);
 
     visuals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG relative luminance.
+    fn luminance(colour: Color32) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(colour.r()) + 0.7152 * channel(colour.g()) + 0.0722 * channel(colour.b())
+    }
+
+    /// The WCAG contrast ratio between two colours, from 1 to 21.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Every colour that carries text must be readable on the surface it
+    /// is drawn on, in both themes.
+    ///
+    /// Not a formality. The σ table prints its spreads *in the colour of
+    /// their classification*, at ten pixels — so a ramp chosen for how it
+    /// looks against a dark panel and never checked against a light one
+    /// makes the central number of the application unreadable for half its
+    /// users. The threshold is WCAG AA for body text; the values were
+    /// chosen by solving for it rather than by eye.
+    #[test]
+    fn every_colour_that_carries_text_is_legible() {
+        for mode in [Mode::Dark, Mode::Light] {
+            let palette = Palette::of(mode);
+            for (name, colour) in [
+                ("text", palette.text),
+                ("muted", palette.muted),
+                ("faint", palette.faint),
+                ("accent", palette.accent),
+                ("high", palette.high),
+                ("medium", palette.medium),
+                ("low", palette.low),
+            ] {
+                let ratio = contrast(colour, palette.surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{mode:?}: {name} on the panel is {ratio:.2}:1, below AA"
+                );
+            }
+        }
+    }
+
+    /// A cloud has to be visible against the viewport, and the two clouds
+    /// against each other.
+    #[test]
+    fn the_clouds_stand_out_from_the_viewport() {
+        for mode in [Mode::Dark, Mode::Light] {
+            let palette = Palette::of(mode);
+            for (name, colour) in [
+                ("point", palette.point),
+                ("point_moving", palette.point_moving),
+                ("high", palette.high),
+                ("low", palette.low),
+            ] {
+                let ratio = contrast(colour, palette.background);
+                assert!(
+                    ratio >= 3.0,
+                    "{mode:?}: {name} in the viewport is {ratio:.2}:1"
+                );
+            }
+            let apart = contrast(palette.point, palette.point_moving);
+            assert!(
+                apart >= 1.4,
+                "{mode:?}: the two clouds are {apart:.2}:1 apart, which is not enough to \
+                 tell which is which"
+            );
+        }
+    }
 }

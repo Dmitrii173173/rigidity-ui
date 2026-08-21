@@ -20,6 +20,7 @@ use rigidity_core::observability::{Analysis, Conditioning, ObservabilityCriteria
 use rigidity_pipeline::{PipelineError, PrepareParams, Progress, RegisterParams, ReportParams};
 
 use crate::bench::Bench;
+use crate::commands::{Command, Commands};
 use crate::engine::session::{Registration, Surface};
 use crate::engine::{Demo, Engine, Event, Held};
 use crate::render::camera::Camera;
@@ -99,6 +100,15 @@ pub(crate) struct App {
     failure: Option<PipelineError>,
     work: Work,
     outcome: Outcome,
+    commands: Commands,
+    /// The theme the context was last told about.
+    ///
+    /// A command has no `Context` to hand, so the change is noticed here
+    /// rather than performed there — one place that applies the theme
+    /// instead of one per caller.
+    applied: Mode,
+    /// Text waiting to go to the clipboard, for the same reason.
+    clipboard: Option<String>,
     /// Bumped on every new outcome, so anything derived from one knows
     /// when it has gone stale.
     answered: u64,
@@ -123,7 +133,7 @@ pub(crate) struct App {
 impl App {
     /// Builds the app, the GPU pipelines and the worker thread.
     pub(crate) fn new(cc: &eframe::CreationContext<'_>, open: Vec<PathBuf>) -> Self {
-        let mode = Mode::Dark;
+        let mode = Mode::initial(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, mode);
         let engine = Engine::spawn(cc.egui_ctx.clone());
         for path in open {
@@ -140,6 +150,9 @@ impl App {
             failure: None,
             work: Work::Idle,
             outcome: Outcome::Nothing,
+            commands: Commands::default(),
+            applied: mode,
+            clipboard: None,
             answered: 0,
             hovered: None,
             contribution: None,
@@ -474,12 +487,16 @@ impl App {
     }
 
     fn shortcuts(&mut self, ui: &egui::Ui) {
-        let (open, fit, cancel, run, dropped) = ui.input(|input| {
+        let (palette, letters, dropped) = ui.input(|input| {
             (
-                input.modifiers.matches_logically(Modifiers::COMMAND) && input.key_pressed(Key::O),
-                input.key_pressed(Key::F),
-                input.key_pressed(Key::Escape),
-                input.key_pressed(Key::Space),
+                input.modifiers.matches_logically(Modifiers::COMMAND) && input.key_pressed(Key::K),
+                [
+                    input.modifiers.matches_logically(Modifiers::COMMAND)
+                        && input.key_pressed(Key::O),
+                    input.key_pressed(Key::F),
+                    input.key_pressed(Key::Escape),
+                    input.key_pressed(Key::Space),
+                ],
                 input
                     .raw
                     .dropped_files
@@ -488,23 +505,110 @@ impl App {
                     .collect::<Vec<_>>(),
             )
         });
-        if open {
-            self.open();
+
+        if palette
+            || self
+                .bench
+                .as_ref()
+                .is_some_and(|bench| bench.commands() && !self.commands.is_open())
+        {
+            self.commands.toggle();
         }
-        if fit && let Some((min, max)) = self.bounds() {
-            self.camera.fit(min, max);
+        // While the list is open the keyboard belongs to it: `f` is the
+        // letter f, and escape closes the list rather than stopping a run.
+        if !self.commands.is_open() {
+            let [open, fit, cancel, run] = letters;
+            if open {
+                self.run_command(Command::Open);
+            }
+            if fit {
+                self.run_command(Command::Fit);
+            }
+            if cancel {
+                self.run_command(Command::Cancel);
+            }
+            if run {
+                self.run_command(Command::Run);
+            }
         }
-        if cancel && matches!(self.work, Work::Running { .. }) {
-            self.engine.cancel();
-            self.work = Work::Cancelled;
-        }
-        if run && !matches!(self.work, Work::Running { .. }) {
-            self.request();
-        }
+
         // Dropping is how a file actually gets opened; the dialog is the
         // fallback for people who do not know that yet.
         for path in dropped {
             self.engine.load(path);
+        }
+    }
+
+    /// Everything the palette offers, in the order it offers it.
+    ///
+    /// Commands that cannot do anything right now are left out rather than
+    /// shown greyed: a list you have to read past is worse than a shorter
+    /// one.
+    fn available(&self) -> Vec<Command> {
+        let mut commands = vec![Command::Open];
+        commands.extend([Demo::Corridor, Demo::Corner, Demo::Sphere].map(Command::Demo));
+        if self.target.is_some() {
+            commands.push(Command::Run);
+        }
+        if matches!(self.work, Work::Running { .. }) {
+            commands.push(Command::Cancel);
+        }
+        if self.target.is_some() {
+            commands.extend([Command::Fit, Command::Copy, Command::Clear]);
+        }
+        if self.source.is_some() {
+            commands.push(Command::Swap);
+        }
+        if matches!(self.outcome, Outcome::Registration { .. }) {
+            commands.push(Command::Residuals);
+        }
+        commands.push(Command::Theme);
+        commands
+    }
+
+    /// Does one thing, whether it was typed, clicked or chosen from the list.
+    fn run_command(&mut self, command: Command) {
+        match command {
+            Command::Open => self.open(),
+            Command::Demo(demo) => {
+                self.target = None;
+                self.source = None;
+                self.outcome = Outcome::Nothing;
+                self.iterations.clear();
+                self.failure = None;
+                self.engine.scene(demo);
+            }
+            Command::Run => {
+                if !matches!(self.work, Work::Running { .. }) {
+                    self.request();
+                }
+            }
+            Command::Cancel => {
+                if matches!(self.work, Work::Running { .. }) {
+                    self.engine.cancel();
+                    self.work = Work::Cancelled;
+                }
+            }
+            Command::Fit => {
+                if let Some((min, max)) = self.bounds() {
+                    self.camera.fit(min, max);
+                }
+            }
+            Command::Swap => {
+                std::mem::swap(&mut self.source, &mut self.target);
+                self.iterations.clear();
+                self.request();
+            }
+            Command::Copy => self.clipboard = Some(self.command()),
+            Command::Theme => self.mode = self.mode.flipped(),
+            Command::Residuals => self.residual_colours = !self.residual_colours,
+            Command::Clear => {
+                self.target = None;
+                self.source = None;
+                self.outcome = Outcome::Nothing;
+                self.iterations.clear();
+                self.failure = None;
+            }
         }
     }
 
@@ -531,6 +635,13 @@ impl App {
     }
 }
 
+/// Room at the top of the inspector for the window's own buttons.
+///
+/// On macOS the traffic lights float over the content, at roughly twenty
+/// points from the left and twenty from the top. Anything drawn there is
+/// under them.
+pub(crate) const CHROME_INSET: i8 = if cfg!(target_os = "macos") { 22 } else { 0 };
+
 /// How far the residual may exceed the stated sensor noise before the
 /// report stops being believable. A converged registration leaves
 /// residuals of about the noise; three times that is generous.
@@ -540,6 +651,15 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.drain_events();
         self.shortcuts(ui);
+        // A command has no context to hand, so the two things that need
+        // one are noticed here instead of performed there.
+        if self.applied != self.mode {
+            theme::apply(ui.ctx(), self.mode);
+            self.applied = self.mode;
+        }
+        if let Some(text) = self.clipboard.take() {
+            ui.ctx().copy_text(text);
+        }
         if let Some(bench) = &mut self.bench {
             bench.step(ui.ctx(), &mut self.camera, self.target.is_some());
         }
@@ -554,6 +674,11 @@ impl eframe::App for App {
         // running underneath the panel.
         self.timeline_strip(ui, &palette);
         self.viewport(ui, &palette);
+
+        let available = self.available();
+        if let Some(command) = self.commands.show(ui.ctx(), &palette, &available) {
+            self.run_command(command);
+        }
     }
 }
 
@@ -699,10 +824,13 @@ impl App {
             .frame(
                 egui::Frame::NONE
                     .fill(palette.surface)
-                    .inner_margin(egui::Margin::same(space::PANEL)),
+                    .inner_margin(egui::Margin {
+                        top: space::PANEL + CHROME_INSET,
+                        ..egui::Margin::same(space::PANEL)
+                    }),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                let header = ui.horizontal(|ui| {
                     ui.label(RichText::new("rigidity").color(palette.text).size(15.0));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if quiet_button(ui, palette, self.mode.label(), "switch theme") {
@@ -711,6 +839,18 @@ impl App {
                         }
                     });
                 });
+                // Without a title bar there is nothing to move the window
+                // by, so the name at the top of the panel is it.
+                if ui
+                    .interact(
+                        header.response.rect,
+                        egui::Id::new("window drag"),
+                        Sense::drag(),
+                    )
+                    .drag_started()
+                {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
                 ui.add_space(space::GROUP);
 
                 egui::ScrollArea::vertical()
@@ -963,7 +1103,7 @@ impl App {
                 .on_hover_text("on the downsampled source, which is what the solver used")
                 .changed()
             {
-                self.residual_colours = residuals;
+                self.run_command(Command::Residuals);
             }
         }
 

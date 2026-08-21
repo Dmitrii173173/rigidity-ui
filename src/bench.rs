@@ -36,6 +36,8 @@ pub(crate) struct Bench {
     /// differ only by the motion under test.
     row: Option<usize>,
     phase: Option<f64>,
+    /// Whether to open the command list, so that it can be looked at.
+    commands: bool,
     seconds: f32,
     started: Option<Instant>,
     frames: Vec<f32>,
@@ -54,12 +56,18 @@ impl Bench {
             phase: std::env::var("RIGIDITY_UI_PHASE")
                 .ok()
                 .and_then(|value| value.parse().ok()),
+            commands: std::env::var("RIGIDITY_UI_COMMANDS").is_ok(),
             seconds,
             started: None,
             frames: Vec::new(),
             shot: std::env::var("RIGIDITY_UI_SHOT").ok().map(PathBuf::from),
             finished: false,
         })
+    }
+
+    /// Whether the command list should be showing.
+    pub(crate) fn commands(&self) -> bool {
+        self.commands
     }
 
     /// Which σ row to pretend the pointer is on.
