@@ -11,8 +11,15 @@ Companion documents: [`../rigidity/README.md`](../rigidity/README.md),
 
 ## Status
 
+The work is in three stages. Stage 1 is the instrument — the thing no
+other tool does. Stage 2 makes it somewhere you can actually spend a day.
+Stage 3 is where the instrument pays off at scale. They are strictly
+ordered: stage 2 without stage 1 is a worse CloudCompare, and stage 3
+without stage 2 has nowhere to put its scans.
+
 | Milestone | State | Note |
 |---|---|---|
+| **Stage 1 — the instrument** | | |
 | M0 — Scaffold | **done** | window, wgpu callback, shell layout, theme |
 | M1 — Cloud rendering | not started | splats, orbit camera, EDL |
 | M2 — Pipeline and spectrum | not started | worker thread, `analyse`, σ panel |
@@ -20,7 +27,20 @@ Companion documents: [`../rigidity/README.md`](../rigidity/README.md),
 | M4 — Null-space visualisation | not started | the feature the app exists for |
 | M5 — Polish | not started | theme, palette, keyboard, errors |
 | M6 — Packaging | not started | `.app` bundle, CI on three OS |
-| §7 — upstream changes | **done** | all four landed in `../rigidity`; CLI output unchanged |
+| **Stage 2 — the workbench** | | |
+| W1 — Many clouds | not started | scene list, visibility, per-cloud display |
+| W2 — Scalar fields | not started | ramps, histogram, cloud-to-cloud distance |
+| W3 — Selection and geometry | not started | crop, cross-section, measure, subsample |
+| W4 — Manual alignment | not started | point-pair picking; the answer to a wrong basin |
+| W5 — Formats | not started | LAS/LAZ, E57, PCD, export |
+| **Stage 3 — the survey** | | |
+| S1 — Projects | not started | many scans with poses, saved and reopened |
+| S2 — Pose graph | not started | degeneracy-weighted edges — the actual contribution |
+| S3 — Loop closure | not started | manual first, detected later |
+| S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
+| **Upstream** | | |
+| §7 — first four changes | **done** | landed in `../rigidity`; CLI output unchanged |
+| §7 — stage 2 and 3 needs | not started | listed, none of them blocking today |
 
 ---
 
@@ -31,11 +51,28 @@ degrees of freedom did the geometry actually determine?* The CLI prints that
 answer as six lines of σ values. Six lines is the right output for a script
 and the wrong output for a human — nobody looks at `ρ=[+0.00 +1.00 +0.00]`
 and pictures a corridor sliding along itself. **This application exists to
-make the ambiguous direction visible.** Everything else it does — loading,
-rendering, registering — is infrastructure in service of that one screen.
+make the ambiguous direction visible.** Loading, rendering and registering
+are infrastructure in service of that one screen.
 
-Anything the CLI already does well stays in the CLI. If a feature does not
-end in something you can *see*, it does not belong here.
+That is stage 1, and it stays the reason the application exists. Stages 2
+and 3 follow from a plainer observation: nobody opens a diagnostic on its
+own. The measurement happens inside a day's work — clouds get cropped,
+compared, measured, aligned by hand when ICP lands in the wrong basin, and
+eventually there are forty of them rather than two. A diagnostic that
+forces the user out to CloudCompare and back for every one of those steps
+is a diagnostic that does not get used.
+
+So: **stage 2 is a small, opinionated CloudCompare** — the ten tools out of
+its hundreds that are used daily, and no more. Not a clone; a workbench
+good enough that the instrument is at hand. **Stage 3 is many scans**: a
+project, a pose graph, loop closure. It belongs here rather than being
+scope creep for one reason, and it is a strong one — see §8, stage 3.
+
+The order is not negotiable. Stage 2 before stage 1 would be a worse
+CloudCompare with nothing to offer; stage 3 before stage 2 would have
+nowhere to put its scans. And the filter stays the same at every stage: a
+feature belongs here if it **answers a question the CLI cannot**. Anything
+that is only "the same thing, but with a button" stays in the CLI.
 
 ---
 
@@ -98,6 +135,26 @@ bytemuck = { version = "1.25", features = ["derive"] }
 Note for M1: `nalgebra`'s bytemuck feature is spelled `convert-bytemuck`,
 and a `Matrix4<f32>` behind it goes into a uniform buffer with no
 conversion layer. That is what keeps a second linear-algebra crate out.
+
+**What stages 2 and 3 add — and how little it is.** Worth stating plainly,
+because "a CloudCompare and a SLAM package" sounds like it should drag in a
+dependency tree, and it does not:
+
+| Need | Answer |
+|---|---|
+| Selection, cross-section, measurement, crop | Own code. Screen-space maths and a `KdTree` we already build. |
+| Point picking | CPU ray against the kd-tree first; a GPU id buffer only if that proves too slow, which at one nearest-neighbour query per click it will not. |
+| Colour ramps, histograms | Own code. A 1-D lookup texture and a vertex attribute. |
+| Cloud-to-cloud distance | `rigidity-spatial`, unchanged. |
+| Absolute orientation (W4) | A 3×3 SVD — `nalgebra` has it; the solver belongs upstream (§7). |
+| LAS/LAZ, E57, PCD (W5) | `las` with its laz feature and the `e57` crate are already declared in `../rigidity`'s workspace; a PCD crate gets chosen at W5, not now. |
+| Project files (S1) | `serde` + `toml`, one small pair, in the viewer only. The core stays serde-free. |
+| Pose-graph solve (S2) | `nalgebra` dense to a few hundred poses. `faer` is the candidate if and when sparse is genuinely needed — decided against a measurement, not in advance. |
+| Loop-closure descriptors (S3) | Own code. The published descriptors in this space are a page of arithmetic each; a crate would be a dependency for less code than reading its docs. |
+
+The rule the table encodes: a dependency is taken when it does something we
+cannot correctly do ourselves in comparable effort — file formats, linear
+algebra, windowing — and not otherwise.
 
 **Why this and not something else.**
 
@@ -237,6 +294,32 @@ stores points that way.
 └────────────────────────────────────────────────────────┘
 ```
 
+**One piece of mathematics, shown three ways.** These are not three
+features to prioritise against each other; they are one identity seen from
+three sides, which is why the screen can carry all of them and stay quiet.
+
+The Jacobian row of a point `p` with normal `n` is `[nᵀ | (p×n)ᵀ]`. Project
+it onto the i-th singular direction `ξᵢ = [ρ; φ]`:
+
+```
+rowᵢ · ξᵢ  =  n·ρ + (p×n)·φ  =  n · (ρ + φ×p)  =  n · v
+```
+
+where `v` is the instantaneous velocity of `p` under the rigid motion `ξᵢ`.
+**A point's contribution to σᵢ is the projection of its own motion onto its
+own normal.** Since `σᵢ² = Σ w·(n·v)²`, the three views below are literally
+the same number:
+
+1. *Moving the cloud along `ξᵢ`* — integrate `v`. The corridor slides along
+   itself and the image does not change.
+2. *Colouring each point by `|n·v|`* — the same quantity per point. This
+   decomposes the σ bar over the geometry: it shows which points hold that
+   direction, and in a degenerate direction it shows that almost none do.
+3. *Drawing `v` as arrows on a sample of points* — where the arrows lie flat
+   along a surface, that surface contributes nothing; where they push into
+   it, that is the constraint. Which is also the answer to "where should the
+   next scan point", without having to phrase it as advice.
+
 **The one interaction that matters.** Hovering σ₆ does not highlight a row.
 It takes the null-space direction from `Conditioning::direction_in_world(5)`
 and gently oscillates the source cloud along it, with an amplitude of a few
@@ -245,6 +328,25 @@ corridor and *nothing appears to change* — which is precisely what "this
 degree of freedom is not determined" means, shown rather than asserted.
 Hovering σ₁ does the same and the walls visibly tear apart. Release, and it
 eases back to the registered pose in 160 ms.
+
+**The tolerance is a line, not a label.** The spread axis is logarithmic —
+in the README's own example the six values span 6.6·10⁻⁵ to 3·10⁻³ — and a
+single vertical line across it marks `--tolerance`. Classification stops
+being a word next to a bar and becomes geometry: the bars that cross the
+line are the problem. Dragging the tolerance slider moves the line and
+recolours the bars live, because `classify()` and `uncertainty()` are pure
+functions of the six stored singular values and cost nothing to re-evaluate.
+That interaction is the single cheapest thing on this screen and probably
+the most useful: it turns "is 5 mm of spread acceptable?" from a judgement
+into a look.
+
+**The mode is inferred, never chosen.** One cloud loaded: the spectrum of
+that surface — *if anything were registered against this, what would it
+determine?* — which is a scan-planning tool in its own right and is cheaper
+than registration, so it arrives first (M2). A second cloud loaded: the
+registration appears. There are no tabs, no radio buttons and no mode
+switch, because there is nothing a mode switch would tell the application
+that the scene does not already say.
 
 Every other decision follows from keeping that screen uncluttered:
 
@@ -259,14 +361,30 @@ Every other decision follows from keeping that screen uncluttered:
   points* are holding that direction down.
 - **Iteration timeline**: appears only after a registration, as a thin scrub
   strip above the status line. Poses come from the `register_observed`
-  callback; scrubbing is a uniform write.
+  callback; scrubbing is a uniform write. **Any pose on it can become the
+  next starting pose** — `register_pair_observed` already takes an
+  `initial`, so "scrub back to where it still looked right, change the
+  parameters, run from there" costs one argument. It is most of the value of
+  a manual alignment tool for none of its cost, and it stays useful after
+  W4 adds the real one.
+- **Export, three things**: the report as text, identical to what the CLI
+  prints; the transformed source as PLY; and the command line that
+  reproduces the numbers on screen. The last is not a convenience — §1
+  requires that every screen showing a number can produce the `rigidity …`
+  invocation that yields it.
 - **RMSE is never far from the spectrum.** The README is explicit that
   conditioning cannot detect a wrong local minimum, and that on real data 11
   of 30 pairs converged to a wrong basin with perfectly healthy spectra. A UI
   that shows a confident spectrum without the residual next to it would be
-  actively misleading. When RMSE is high relative to the noise floor, the
-  spectrum panel is marked as unreliable rather than merely accompanied by a
-  number.
+  actively misleading. When RMSE is high relative to the stated sensor
+  noise, the spectrum panel is marked unreliable — greyed, with the reason
+  spelled out — rather than merely accompanied by a number. One comparison
+  of two floats; without it the application lies confidently in exactly the
+  case that matters most.
+- **Demo scenes in the palette.** `rigidity-scenes` generates a corridor, a
+  corner, a cylinder and four more with analytically known null spaces and
+  no files involved. The application explains itself in ten seconds to
+  someone who has not got a dataset to hand, at nearly zero cost.
 
 **Visual language.** Dark by default, light supported, system-aware. Near
 black `#0E0F11`, two surface steps above it, one accent. Separation by
@@ -295,7 +413,20 @@ is 120–160 ms ease-out on state changes and camera moves, and nowhere else.
 - **Budget.** One million points is four million vertices — comfortable at
   60 fps on Apple Silicon. Above roughly five million, render the
   voxel-downsampled cloud during interaction and the full one when the
-  camera is idle. Octree LOD and out-of-core streaming are out of scope (§9).
+  camera is idle. Level of detail beyond that is decided at S1's gate, where
+  the number of scans is known, rather than guessed at now.
+
+What the later stages add to this list, and what they do not:
+
+- **A model matrix per cloud** (W1). Already the design — a pose change is a
+  uniform write, never a re-upload — so many clouds cost buffers, not passes.
+- **A scalar attribute buffer and a 1-D ramp texture** (W2). One extra vertex
+  attribute; the ramp and its clamps live in the uniform, so dragging a
+  histogram handle is a 64-byte write and not a re-upload of anything.
+- **Clipping planes** (W3) as a uniform the fragment shader discards against.
+  A cross-section is then free to animate, which is what makes it usable.
+- **Picking** (W3) on the CPU: unproject the click, query the kd-tree, done.
+  No id buffer, no readback, no frame of latency.
 
 ---
 
@@ -354,12 +485,40 @@ one-thread-versus-eight determinism run, rustdoc `-D warnings`) is green.
    call that is the larger half of the wait, and a bar that interpolated
    through it would be a bar that lies.
 
+### What stages 2 and 3 will need — not requested yet
+
+Listed now so the boundary stays visible: the viewer contributes screens,
+`rigidity` contributes mathematics. Anything whose test does not mention a
+pixel belongs upstream.
+
+5. **Absolute orientation** (W4). Horn/Kabsch from corresponding point
+   pairs: the SVD of a 3×3 correlation matrix, with the reflection case
+   handled. It sits beside the Lie-group code in `rigidity-core::lie` and is
+   testable against exactly the kind of analytical oracle the rest of that
+   crate uses.
+6. **E57** (W5) in `rigidity-io`. The crate is already declared in the
+   workspace and unused; `../rigidity`'s own plan deferred it for want of
+   test data, which is still the honest blocker.
+7. **The pose graph** (S2), and this is the substantial one. Nodes, edges,
+   Gauss–Newton on SE(3), and edge weights derived from each edge's own
+   conditioning rather than from its raw information matrix. It is a
+   `rigidity` feature that happens to have a viewer, not the other way
+   round: it needs the determinism guarantee, the property tests and the
+   synthetic oracles that live upstream. A `rigidity-graph` crate beside
+   `rigidity-core` is the natural home.
+8. **Optionally `serde` behind a feature** (S1), if project files ever need
+   to hold more than paths and poses. Until then the viewer writes its own
+   text and the core stays serde-free, which is worth more than the
+   convenience.
+
 ---
 
 ## 8. Milestones
 
 Each milestone has a gate. A gate is a thing that either passes or does not;
 "looks fine" is not a gate.
+
+### Stage 1 — the instrument
 
 **M0 — Scaffold. Done.** Workspace, pinned toolchain, path dependencies
 resolving against `../rigidity`, an `eframe` window with an `egui-wgpu`
@@ -415,6 +574,119 @@ building on Linux, macOS and Windows against the pinned toolchain.
 *Gate:* a double-clickable application that opens a file by drag and drop
 with no terminal involved.
 
+### Stage 2 — the workbench
+
+A small, opinionated CloudCompare: the handful of its tools that get used
+every day, and nothing else. The measure of success is not feature count —
+it is that a person doing ordinary cloud work never has to leave for
+something trivial and come back.
+
+The rule that keeps this honest: **nothing here mutates a loaded cloud.**
+Every operation produces a new entry in the scene list, the input stays
+where it was, and undo is therefore free and total. That single decision
+removes an undo stack, a dirty-state model and a save-before-quit dialog
+from the application.
+
+**W1 — Many clouds.** The scene stops being two slots and becomes a list:
+visibility, colour, point size and a transform per entry. "Source" and
+"target" become *roles* assigned to two entries rather than a pair of
+loaders. The inspector grows a scene section above the spectrum.
+*Gate:* five clouds loaded at once, hiding one is instant, and each cloud
+owns exactly one GPU buffer — a duplicate upload for a second view of the
+same points is a bug, not an optimisation to do later.
+
+**W2 — Scalar fields.** One scalar per point, a ramp, and a histogram whose
+handles clamp the ramp without touching the data. The fields that feed it:
+height, intensity from LAS, residual after registration, the `|n·v|`
+contribution of §5, and **cloud-to-cloud distance** — the nearest-neighbour
+distance from each point of one cloud to another, which is CloudCompare's
+single most-used number and is three lines against a `KdTree` we already
+build.
+*Gate:* C2C between the demo corridor pair reproduces the known offset;
+moving a histogram clamp changes the ramp and provably not the values.
+
+**W3 — Selection and geometry.** Box and lasso selection in screen space,
+keep or delete producing a *new* cloud; a cross-section as two clipping
+planes with a thickness slider; point-to-point measurement; voxel
+subsampling, which the core already does deterministically.
+*Gate:* a box crop's point count matches an independent count over the same
+box, the original cloud is still in the list unchanged afterwards, and the
+cross-section moves at 60 fps over a million points.
+
+**W4 — Manual alignment.** Pick three or more corresponding point pairs
+across two clouds; solve absolute orientation in closed form (Horn/Kabsch,
+the SVD of a 3×3 correlation matrix); use the result as the initial pose and
+run ICP from it. This is CloudCompare's most-used tool and it is also the
+honest answer to the failure mode the README documents — a wrong basin that
+no spectrum will flag, because conditioning describes the local shape of the
+cost function and says nothing about which minimum you are in.
+*Gate:* a demo pair displaced by 30°, far outside ICP's basin from the
+identity, converges to the true pose after three picked pairs — and fails to
+converge without them, which is the half of the test that proves the tool
+does something.
+
+**W5 — Formats.** LAS/LAZ in and out, E57 (declared in the workspace
+dependencies and still unused), PCD, and export of any entry in the list.
+*Gate:* every format round-trips at millimetre fidelity, and a
+georeferenced LAS keeps its absolute coordinates — which is what the
+`f32`-offset-from-an-`f64`-origin storage exists for, so a regression here
+is a regression in the core's central invariant.
+
+### Stage 3 — the survey
+
+Forty scans instead of two. This is the stage that justifies the whole
+project, and it rests on one observation.
+
+**Why a pose graph belongs in *this* application.** Every pairwise
+registration already produces `IcpResult.information` — the matrix `JᵀWJ` at
+the solution — which is exactly the information matrix a pose-graph edge
+needs. Standard packages take it at face value. The README's own
+measurement says that is wrong by a factor of about seventeen on real data,
+and the conditioning analysis says something stronger and more useful: *it
+says which directions of that matrix are worth anything at all.* An edge
+built from a corridor should carry no weight along the corridor — not a
+small weight, not a fabricated one, none — and every other tool in this
+space either does not know that or cannot express it.
+
+**Degeneracy-weighted pose-graph optimisation is the contribution.** The
+viewer is how you see it; the mathematics belongs upstream in `rigidity`
+(§7), with its own tests and the same determinism guarantee as everything
+else there.
+
+**S1 — Projects.** Many scans, each with a pose and its own parameters;
+saved and reopened. The project file references clouds by path and stores
+poses as text; it is the viewer's format, not the core's.
+*Gate:* a project of twenty scans reopens with every pose bit-identical —
+poses are written at full `f64` precision, because a project that drifts on
+save is a project that cannot be trusted to measure drift.
+
+Also the point at which the level-of-detail question stops being theoretical:
+twenty scans of a million points each is twenty times the M1 budget. The
+decision — octree LOD, out-of-core, or simply rendering the downsampled
+copies until the camera stops — is made here against a real number rather
+than guessed at now.
+
+**S2 — Pose graph.** Gauss–Newton on SE(3) over the graph, with each edge's
+information matrix filtered through its own conditioning: directions whose
+predicted spread exceeds the tolerance contribute nothing. Dense normal
+equations to a few hundred poses (a 1200×1200 solve is milliseconds);
+sparse only when a real survey demands it.
+*Gate:* a synthetic loop with known poses and one deliberately degenerate
+leg — the weighted optimisation ends with measurably less drift than the
+naive one, and both are bit-for-bit reproducible at any thread count.
+
+**S3 — Loop closure.** Manual first: pick two scans, register them, add the
+edge, re-optimise. Detection afterwards, and only if the manual path proves
+it is worth it.
+*Gate:* manual closure removes the drift from a synthetic loop; any later
+detector is measured as precision and recall against the same loop, not
+demonstrated on a screenshot.
+
+**S4 — Whole-survey view.** The σ panel at survey scale: residual per edge,
+conditioning per scan, drift along the trajectory.
+*Gate:* the deliberately weak leg of a synthetic survey is identifiable
+from this view alone, by someone who was not told where it is.
+
 ---
 
 ## 9. Anti-scope
@@ -422,24 +694,35 @@ with no terminal involved.
 Each entry has the condition under which it may be reopened. Without a
 condition it is not an anti-scope entry, it is a mood.
 
-- **No cloud editing, cropping, annotation or measurement.** *Unblock:*
-  never. That is CloudCompare's job and it does it well.
-- **No project or session management, no registration graph, no SLAM.**
-  *Unblock:* when someone needs to register more than two clouds twice in a
-  week.
-- **No octree LOD or out-of-core streaming.** *Unblock:* when a real dataset
-  above twenty million points has to be shown at full density.
-- **No E57.** *Unblock:* when `rigidity-io` learns to read it — the format is
-  declared in the workspace dependencies but no crate uses it.
-- **No web build.** *Unblock:* never. WebGPU plus a million points plus local
-  file access is a different product with a different plan.
+Four entries were removed when stages 2 and 3 were adopted: cropping and
+measurement (now W3), manual alignment (now W4, and a better tool than the
+gizmo this plan first imagined), projects and the registration graph (now
+S1 and S2), and E57 (now W5). They are recorded here as removed rather than
+deleted, because an anti-scope list that quietly loses its entries teaches
+nobody anything. Level-of-detail moved too: it is no longer refused, it is
+scheduled — the decision happens at S1's gate, against a real point count.
+
+- **Not a CloudCompare clone.** Stage 2 is ten tools, not two hundred. Every
+  candidate for an eleventh has to displace one of the ten. *Unblock:* never
+  as a blanket; each tool argues for itself against that bar.
+- **No meshing, no surface reconstruction, no texturing.** Poisson
+  reconstruction and its relatives are a different problem with a different
+  literature, and MeshLab is right there. *Unblock:* never.
+- **No rasters, no DEMs, no GIS layers.** *Unblock:* never; that is QGIS.
+- **No live or online SLAM.** Stage 3 is post-processing: scans on disk,
+  poses solved at leisure, every result reproducible. A live front end has
+  hard real-time constraints and an entirely different failure model.
+  *Unblock:* never in this application.
+- **No photogrammetry, no image input.** *Unblock:* never.
+- **No web build.** WebGPU plus a million points plus local file access is a
+  different product with a different plan. *Unblock:* never.
 - **No plugins, no scripting, no embedded Python.** *Unblock:* never; that is
-  what the CLI is.
-- **No manual alignment gizmo.** *Unblock:* plausible, and the likeliest M7.
-  The README is clear that a wrong initial pose sends ICP into a wrong basin
-  that no spectrum will flag; a coarse manual pre-alignment is the honest
-  answer to that, and a 3D gizmo is the only way to offer it. Deferred, not
-  rejected.
+  what the CLI is for, and `rigidity-pipeline` is its library.
+- **No destructive editing.** Not a limitation but a design decision, and the
+  one that pays for stage 2's simplicity: every operation makes a new cloud,
+  the input is never touched, and so there is no undo stack, no dirty state
+  and no save-before-quit dialog anywhere in the application. *Unblock:*
+  only if memory pressure makes copies untenable, which is an S1 question.
 
 ---
 
