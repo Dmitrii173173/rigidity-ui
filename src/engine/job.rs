@@ -265,6 +265,13 @@ pub(crate) enum Event {
         /// and a generated scene has none — so it names the `rigidity
         /// scene` invocations that would produce them first.
         generated: bool,
+        /// A coarse copy for drawing while the camera moves, when the
+        /// cloud is big enough to need one.
+        ///
+        /// Built here rather than on demand because it is a whole-cloud
+        /// pass and this thread is the one that is allowed to take a
+        /// second. See `engine::coarse` and PLAN.md §8, S1.
+        coarse: Option<Arc<PointCloud>>,
         /// The bounding box, in absolute coordinates.
         ///
         /// Absolute rather than local because two clouds have two origins,

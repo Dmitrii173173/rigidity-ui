@@ -32,6 +32,35 @@ use crate::render::{self, CloudDraw, ViewportCallback};
 use crate::theme::{self, Mode, Palette, space};
 use crate::{histogram, spectrum, timeline};
 
+/// How many points the viewport can draw and still turn smoothly.
+///
+/// Measured, not guessed (S1's level-of-detail gate; the numbers and the
+/// decision are in PLAN.md §8). This renderer is fill-bound and its cost is
+/// linear in points at about 6.2 ms per million on the machine the gate was
+/// run on: two million holds 60 fps, five million gives 30, twenty gives 8.
+/// Twenty scans of a million points each — the case stage three exists for
+/// — is seven times over.
+///
+/// A single number rather than a per-machine measurement because the
+/// consequence of being wrong is a preview that is slightly too coarse or
+/// slightly too slow for one frame, and a viewer that benchmarks itself on
+/// startup is a viewer that does something inexplicable on startup.
+const VIEWPORT_BUDGET: usize = 2_700_000;
+
+/// How long after the last camera movement the full clouds come back.
+///
+/// Long enough not to flicker between the two while someone is turning the
+/// scene in short strokes, short enough that letting go and looking feels
+/// like the same gesture.
+const SETTLE: f64 = 0.2;
+
+/// Marks a preview's coordinates in the renderer's cache.
+///
+/// The renderer keys buffers by a `u64` it never interprets, so the two
+/// copies of one cloud need two keys. Bit 62; the solver's own downsampled
+/// cloud already has bit 63.
+const COARSE: u64 = 1 << 62;
+
 /// A cloud in the scene.
 ///
 /// The scene is a list, not two slots. *Source* and *target* are roles
@@ -49,6 +78,10 @@ struct Entry {
     min: na::Vector3<f64>,
     max: na::Vector3<f64>,
     seconds: f64,
+    /// A coarse copy, drawn instead while the camera is moving and the
+    /// scene is over budget. `None` for a cloud small enough to be its own
+    /// preview.
+    coarse: Option<Arc<PointCloud>>,
     /// Where it sits: the motion carrying its own coordinates into the
     /// survey frame.
     ///
@@ -304,6 +337,18 @@ pub(crate) struct App {
     report: ReportParams,
     registration: RegisterParams,
     camera: Camera,
+    /// The camera as it was at the end of the previous frame.
+    ///
+    /// Comparing beats setting a flag at each of the four places the
+    /// camera moves: the fifth place — a fit, a bench step, whatever
+    /// arrives next — would have been the one that forgot.
+    camera_previous: Camera,
+    /// When the camera last changed, on egui's clock.
+    ///
+    /// Not a boolean: what the viewport needs to know is *how long ago*,
+    /// so that the full clouds come back on their own rather than waiting
+    /// for one more event to arrive and clear a flag.
+    camera_moved: f64,
     point_size: f32,
     edl_strength: f32,
     generation: u64,
@@ -315,8 +360,30 @@ impl App {
         let mode = Mode::initial(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, mode);
         let engine = Engine::spawn(cc.egui_ctx.clone());
+        // A project named on the command line is opened as one, not read
+        // as a cloud: `rigidity-ui survey.rgp` is the shape of the thing
+        // stage three is for, and having to open the file dialog for it
+        // after typing its name would be a hole in the same size of hole
+        // as not accepting it at all.
+        let mut opening = Vec::new();
+        let mut failure = None;
         for path in open {
-            engine.load(path);
+            if path
+                .extension()
+                .is_some_and(|end| end == project::EXTENSION)
+            {
+                match Project::read(&path) {
+                    Ok(project) => {
+                        for scan in &project.scans {
+                            engine.load(scan.path.clone());
+                        }
+                        opening.extend(project.scans);
+                    }
+                    Err(problem) => failure = Some(Failure::Project { path, problem }),
+                }
+            } else {
+                engine.load(path);
+            }
         }
         Self {
             mode,
@@ -327,8 +394,8 @@ impl App {
             target_id: None,
             source_id: None,
             reading: None,
-            failure: None,
-            opening: Vec::new(),
+            failure,
+            opening,
             work: Work::Idle,
             measuring: None,
             outcome: Outcome::Nothing,
@@ -358,6 +425,8 @@ impl App {
             report: ReportParams::default(),
             registration: RegisterParams::default(),
             camera: Camera::default(),
+            camera_previous: Camera::default(),
+            camera_moved: f64::NEG_INFINITY,
             // Three points across, not one: at one physical pixel a splat
             // covers less than the average spacing of a real scan and the
             // surface comes out as noise.
@@ -632,6 +701,7 @@ impl App {
                     path,
                     generated,
                     cloud,
+                    coarse,
                     bounds,
                     seconds,
                 } => {
@@ -652,6 +722,7 @@ impl App {
                         path,
                         generated,
                         cloud,
+                        coarse,
                         min: min.into(),
                         max: max.into(),
                         seconds,
@@ -1257,6 +1328,21 @@ impl eframe::App for App {
                 .find(|source| source.label() == name);
             self.selected = Some(id);
             self.colour_by(id, source);
+        }
+        // Noticed a frame late, deliberately: the camera moves inside the
+        // viewport, which is drawn further down. One frame of full detail
+        // at the start of a drag is one frame; asking every mutation to
+        // remember to report itself is forever.
+        let now = ui.ctx().input(|input| input.time);
+        if self.camera != self.camera_previous {
+            self.camera_previous = self.camera;
+            self.camera_moved = now;
+        }
+        // Without this the last frame of a drag is the last frame there is,
+        // and the full clouds never come back until something else asks for
+        // a repaint.
+        if now - self.camera_moved < SETTLE {
+            ui.ctx().request_repaint();
         }
         if let Some(bench) = &mut self.bench {
             bench.step(
@@ -2376,6 +2462,23 @@ impl App {
         // different voxel produces different points from the same file.
         let sampled_generation = (1 << 63) | self.answered;
 
+        // The preview, and the two conditions it takes. Over budget,
+        // because below it there is nothing to buy; and moving, because a
+        // still survey is worth its one slow frame and then costs nothing
+        // — egui does not repaint what nobody is touching.
+        //
+        // The renderer keys coordinates by generation and never evicts, so
+        // both copies stay resident and swapping between them costs no
+        // upload at all. That is the whole reason this is three lines
+        // rather than an octree.
+        let on_screen: usize = self
+            .entries
+            .iter()
+            .filter(|entry| entry.visible)
+            .map(|entry| entry.cloud.len())
+            .sum();
+        let preview = on_screen > VIEWPORT_BUDGET && time - self.camera_moved < SETTLE;
+
         let mut draws = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             let is_source = source_id == Some(entry.id);
@@ -2418,10 +2521,17 @@ impl App {
                 _ => None,
             };
 
-            let (cloud, generation) = match (&painted, &sampled) {
-                (Some((_, _, _, _, _, true)), Some(sampled)) => {
+            let (cloud, generation) = match (&painted, &sampled, &entry.coarse) {
+                (Some((_, _, _, _, _, true)), Some(sampled), _) => {
                     (Arc::clone(sampled), sampled_generation)
                 }
+                // Only an uncoloured cloud can be swapped for its preview:
+                // a scalar field is one value per point of the *full*
+                // cloud, and handing those values to a tenth as many points
+                // would colour them by whatever happened to be at that
+                // index. A coloured cloud is what the person is looking at
+                // anyway, so it is the last one to want thinning.
+                (None, _, Some(coarse)) if preview => (Arc::clone(coarse), COARSE | entry.id),
                 _ => (Arc::clone(&entry.cloud), entry.id),
             };
 

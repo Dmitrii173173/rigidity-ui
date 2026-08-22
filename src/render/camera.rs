@@ -13,7 +13,7 @@
 use rigidity_core::nalgebra as na;
 
 /// Where the eye is and what it can see.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Camera {
     /// What the camera orbits, in local coordinates.
     pub(crate) target: na::Point3<f32>,

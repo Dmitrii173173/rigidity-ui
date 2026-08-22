@@ -225,6 +225,7 @@ fn run(
                     path,
                     generated: false,
                     bounds: bounds_of(&cloud),
+                    coarse: coarse(&cloud),
                     cloud: Arc::new(cloud),
                     seconds: start.elapsed().as_secs_f64(),
                 },
@@ -321,6 +322,7 @@ fn run(
                     path: PathBuf::from(name),
                     generated: true,
                     bounds: bounds_of(&cloud),
+                    coarse: coarse(&cloud),
                     cloud: Arc::new(cloud),
                     seconds: start.elapsed().as_secs_f64(),
                 },
@@ -333,6 +335,7 @@ fn run(
             let start = Instant::now();
             for (name, cloud) in demo_pair(demo) {
                 let bounds = bounds_of(&cloud);
+                let coarse = coarse(&cloud);
                 emit(
                     events,
                     ctx,
@@ -341,6 +344,7 @@ fn run(
                         generated: true,
                         cloud: Arc::new(cloud),
                         bounds,
+                        coarse,
                         seconds: start.elapsed().as_secs_f64(),
                     },
                 );
@@ -476,6 +480,57 @@ fn emit(events: &Sender<Event>, ctx: &eframe::egui::Context, event: Event) {
 ///
 /// It is a pass over every point, which is exactly the kind of work the
 /// frame loop cannot afford, so it happens here.
+/// How many points a preview copy is allowed to keep.
+///
+/// A twentieth of the viewport's measured budget (S1, PLAN.md §8): twenty
+/// scans is what stage three is for, and a preview that only works for
+/// five is not a preview. Scans below this are their own preview and get
+/// no copy at all.
+const PREVIEW_POINTS: usize = 135_000;
+
+/// A coarse copy of a cloud, or `None` if it is already small enough.
+///
+/// Voxel rather than every k-th point: a scan's points arrive in scan-line
+/// order, and a stride is free to land on one column of a rasterising
+/// scanner and throw the other ninety-nine away. A voxel cannot, because
+/// what it keeps is decided by where a point is and not by when it
+/// arrived.
+///
+/// The size is guessed from the bounding box and then corrected by
+/// doubling, because the count a voxel yields depends on whether the cloud
+/// is a surface, a line or a solid, and the cloud knows that and this
+/// function does not. Bounded at four rounds: each one is a whole-cloud
+/// pass, and a preview is not worth an unbounded number of them. Coming
+/// out still over the target is acceptable — it is a preview, and the
+/// frame it costs is one frame.
+fn coarse(cloud: &PointCloud) -> Option<Arc<PointCloud>> {
+    if cloud.len() <= PREVIEW_POINTS {
+        return None;
+    }
+    let (min, max) = bounds_of(cloud)?;
+    let diagonal =
+        ((max[0] - min[0]).powi(2) + (max[1] - min[1]).powi(2) + (max[2] - min[2]).powi(2)).sqrt();
+    if !(diagonal.is_finite() && diagonal > 0.0) {
+        return None;
+    }
+    // A surface spanning the diagonal, cut into roughly `sqrt(target)`
+    // cells each way. Wrong for a solid and wrong for a line; the doubling
+    // below is what makes being wrong survivable.
+    let mut voxel = diagonal / (PREVIEW_POINTS as f64).sqrt();
+    for _ in 0..4 {
+        let Ok(sampled) = rigidity_core::voxel::voxel_downsample(cloud, voxel) else {
+            return None;
+        };
+        if sampled.len() <= PREVIEW_POINTS {
+            return Some(Arc::new(sampled));
+        }
+        voxel *= 2.0;
+    }
+    rigidity_core::voxel::voxel_downsample(cloud, voxel)
+        .ok()
+        .map(Arc::new)
+}
+
 fn bounds_of(cloud: &PointCloud) -> Option<([f64; 3], [f64; 3])> {
     let (min, max) = cloud.bounds()?;
     Some(([min.x, min.y, min.z], [max.x, max.y, max.z]))

@@ -34,7 +34,7 @@ without stage 2 has nowhere to put its scans.
 | W4 — Manual alignment | **done** | point pairs, Kabsch upstream, the wrong basin escaped |
 | W5 — Formats | **done** | LAS/LAZ, E57, PCD, export; one door for all of them |
 | **Stage 3 — the survey** | | |
-| S1 — Projects | not started | many scans with poses, saved and reopened |
+| S1 — Projects | **gate passed** | poses bit-identical; LOD decided and built; per-scan parameters outstanding |
 | S2 — Pose graph | not started | degeneracy-weighted edges — the actual contribution |
 | S3 — Loop closure | not started | manual first, detected later |
 | S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
@@ -991,11 +991,83 @@ poses as text; it is the viewer's format, not the core's.
 poses are written at full `f64` precision, because a project that drifts on
 save is a project that cannot be trusted to measure drift.
 
-Also the point at which the level-of-detail question stops being theoretical:
-twenty scans of a million points each is twenty times the M1 budget. The
-decision — octree LOD, out-of-core, or simply rendering the downsampled
-copies until the camera stops — is made here against a real number rather
-than guessed at now.
+**Gate passed.** `src/project.rs`, and `Entry` gained a pose. What decided
+the encoding was the word *bit-identical*: twelve numbers per pose, the
+rotation matrix and the translation, not the six of a twist. `Se3` stores a
+matrix, so writing `log` and reading `exp` would round-trip through two
+transcendental functions and come back near the pose rather than at it.
+Twenty scans at UTM coordinates with rotations from `exp` — so the entries
+are the irrational-looking `f64`s a solver actually produces — come back
+with the same bits, through a string and again through a file. Rust's own
+float formatting is the shortest decimal that parses back to the identical
+value, so no precision is specified anywhere; `{:.17}` would be longer, no
+more exact, and would suggest a decision had been made.
+
+Two invariants are tested rather than assumed, because they fail silently.
+Opening a project must not move a scan: `initial` is set to the motion the
+stored poses already describe, so the source is drawn at exactly the pose
+the file gave it and the solver starts from the survey rather than from the
+identity. And placing a registration must not move anything either — it
+changes what a position is attributed to, not the position.
+
+Still outstanding: **per-scan parameters.** `PrepareParams` is one setting
+for the whole application, and the milestone asks for one per scan. Nothing
+in the format prevents it — a `voxel` key beside `pose` — but the inspector
+would need per-cloud controls and the analysis would need to read them, and
+neither is what the gate was about.
+
+### The level-of-detail decision — made against measurements
+
+Twenty scans of a million points is twenty times the M1 budget, and the
+plan deferred the choice between octree LOD, out-of-core and downsampled
+copies until there was a number. There is now. Apple M5, Metal, a 2560×1600
+viewport, the camera orbiting throughout:
+
+| on screen | median frame | |
+|---|---|---|
+| 0.19 M — one real scan | 8.33 ms | 120 fps, vsync |
+| 2 M — two scans | 16.67 ms | 60 fps, vsync |
+| 2.7 M — **twenty** scans | 16.73 ms | 60 fps |
+| 2.7 M — **three** scans | 25.00 ms | 40 fps |
+| 3.8 M — twenty real ETH scans | 36.71 ms | 27 fps |
+| 5 M — five scans | 33.33 ms | 30 fps |
+| 10 M — ten scans | 62.51 ms | 16 fps |
+| 20 M — twenty scans | 120.83 ms | 8 fps |
+
+The cost is linear in points at about 6.2 ms per million, which puts the
+budget at roughly **2.7 M points on screen** for 60 fps. Twenty scans of a
+million each is seven times over, and the guess in the paragraph above was
+right.
+
+The third and fourth rows are the ones that decided it. The same 2.7 M
+points draw *faster* spread across twenty clouds than packed into three,
+because three stations occupy a third of the screen and overlap: this
+renderer is fill-bound, and twenty draw calls cost nothing worth naming.
+An octree's benefit is fewer, larger draws — a benefit against a cost that
+is not there. Out-of-core is ruled out on memory rather than on principle:
+20 M points is 240 MB of coordinates across three `f32` buffers, which a
+unified-memory machine does not notice.
+
+**So: downsampled copies, drawn while the camera moves.** Each scan over
+135 000 points gets a voxel-downsampled preview when it loads, and the
+viewport draws previews whenever the scene is over budget *and* the camera
+moved within the last 200 ms. A still survey costs its one slow frame and
+then nothing, because egui does not repaint what nobody is touching. The
+renderer already keys coordinates by an opaque `u64` and never evicts, so
+both copies stay resident and swapping between them costs no upload — which
+is why this is a few lines rather than a spatial index.
+
+Measured after: 20 M points orbits at **120 fps**, up from 8. The twenty
+real ETH scans go from 27 fps to 120. A cloud carrying a scalar field is
+never swapped for its preview, because the values are one per point of the
+full cloud.
+
+*Unblocks an octree:* a survey whose **previews alone** exceed the budget,
+where coarsening them further stops showing the scene. At 135 000 a scan
+that is about forty scans — which is stage three's own stated target, so
+this is near rather than hypothetical. The voxel is a knob before it is a
+rewrite: 68 000 a scan holds forty.
+*Unblocks out-of-core:* full clouds that no longer fit in memory.
 
 **S2 — Pose graph.** Gauss–Newton on SE(3) over the graph, with each edge's
 information matrix filtered through its own conditioning: directions whose

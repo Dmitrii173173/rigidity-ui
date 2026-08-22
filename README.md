@@ -76,11 +76,52 @@ spectrum is drawn faint and says so. Believe the residual first.
 | `esc` | stop |
 | `F` | fit the view |
 | `M` | measure between two points |
+| `⌘S` | save the project |
 | shift-drag | lasso: keep or delete what it encloses |
 | drag | orbit · right-drag pan · wheel dolly |
 
 Files can also be dropped on the window. Anything that is not a parameter
 lives in `⌘K` and nowhere else — there is no menu bar and no toolbar.
+
+## Projects
+
+```
+cargo run --release -- survey.rgp
+```
+
+A survey is more scans than anyone re-places by hand after closing a
+window, so the scene can be written to a project: which files are in it,
+where each one sits, and which two are playing source and target.
+
+```
+rigidity-project 1
+
+scan  scans/station-00.laz
+pose  1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0
+role  target
+shown yes
+```
+
+Text, so it can be read, diffed and repaired in an editor — the point of
+the application is not trusting numbers you cannot see. Paths are relative
+to the project where they can be, because a survey is a directory that gets
+copied. A pose is the rotation matrix and the translation, twelve numbers
+rather than the six of a twist, and that is the one decision here that is
+not a matter of taste: a twist would round-trip through `exp` and `log` and
+come back *near* where it started, and a project that drifts every time it
+is saved cannot be used to measure drift. Twenty scans reopen at the same
+bits, and there is a test that says so.
+
+A registration is not written until it is **placed** — `⌘K`, *place the
+source where the registration put it* — which moves the scan's own pose to
+where the solver left it. Nothing on screen moves when you do: what changes
+is whether the position survives the next run.
+
+Twenty scans of a million points is seven times what the viewport can draw
+at 60 fps, so each large scan keeps a coarse copy and the viewport draws
+those while the camera is moving, going back to the full clouds a fifth of
+a second after it stops. Twenty million points orbit at 120 fps instead of
+8; the measurements and why this rather than an octree are in `PLAN.md` §8.
 
 ## Numbers you can check
 
@@ -140,10 +181,14 @@ promise. Files are dropped on the window.
 
 ## State
 
-Stage one is finished bar packaging: rendering, the pipeline, registration,
-the null-space demonstration and the polish. `PLAN.md` has the rest —
-a small opinionated CloudCompare next, and after it many scans with a
-degeneracy-weighted pose graph, which is the part no other tool does.
+Stages one and two are finished: rendering, the pipeline, registration, the
+null-space demonstration, and then the ten tools that make it somewhere you
+can spend a day — many clouds, scalar fields, selection and geometry,
+manual alignment, and the formats a survey arrives in. Stage three has
+started: projects hold a survey's scans and their poses. What is left of it
+is the part no other tool does — a pose graph whose edges are weighted by
+each registration's own conditioning, so that an edge from a corridor
+carries no weight along the corridor. `PLAN.md` has the whole of it.
 
 ## License
 
