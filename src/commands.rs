@@ -39,8 +39,16 @@ pub(crate) enum Command {
     Theme,
     /// Colour the source by its point-to-plane residual.
     Residuals,
-    /// Forget both clouds.
+    /// Forget every cloud.
     Clear,
+    /// Make a cloud of the selected points.
+    Keep,
+    /// Make a cloud of everything but them.
+    Drop,
+    /// Make a cloud with one point per voxel.
+    Subsample,
+    /// Pick two points and read the distance between them.
+    Measure,
 }
 
 impl Command {
@@ -56,7 +64,11 @@ impl Command {
             Self::Copy => "copy the command line".to_owned(),
             Self::Theme => "switch theme".to_owned(),
             Self::Residuals => "colour by residual".to_owned(),
-            Self::Clear => "clear both clouds".to_owned(),
+            Self::Clear => "clear the scene".to_owned(),
+            Self::Keep => "keep the selection as a new cloud".to_owned(),
+            Self::Drop => "delete the selection into a new cloud".to_owned(),
+            Self::Subsample => "subsample at the voxel size".to_owned(),
+            Self::Measure => "measure between two points".to_owned(),
         }
     }
 
@@ -67,6 +79,7 @@ impl Command {
             Self::Run => "space",
             Self::Cancel => "esc",
             Self::Fit => "F",
+            Self::Measure => "M",
             _ => "",
         }
     }

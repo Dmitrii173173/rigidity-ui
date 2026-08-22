@@ -95,6 +95,8 @@ pub(crate) enum Lane {
     Report,
     /// Anything that ends in a scalar field.
     Measure,
+    /// Anything that ends in a new cloud in the list.
+    Scene,
 }
 
 impl Lane {
@@ -103,11 +105,39 @@ impl Lane {
         match self {
             Self::Report => 0,
             Self::Measure => 1,
+            Self::Scene => 2,
         }
     }
 
     /// How many there are.
-    pub(crate) const COUNT: usize = 2;
+    pub(crate) const COUNT: usize = 3;
+}
+
+/// How a new cloud is made from an old one.
+///
+/// Never *to* an old one: every operation in this application produces a
+/// new entry and leaves its input alone, which is what makes undo free and
+/// a save-before-quit dialog unnecessary.
+#[derive(Debug, Clone)]
+pub(crate) enum Derivation {
+    /// Keep the selected points.
+    Keep(Arc<Vec<u32>>),
+    /// Keep everything else.
+    Drop(Arc<Vec<u32>>),
+    /// One point per voxel, deterministically.
+    Subsample(f64),
+}
+
+impl Derivation {
+    /// What the result is called, given what it came from.
+    pub(crate) fn name(&self, from: &str) -> String {
+        let stem = from.strip_suffix(".ply").unwrap_or(from);
+        match self {
+            Self::Keep(_) => format!("{stem} (kept).ply"),
+            Self::Drop(_) => format!("{stem} (rest).ply"),
+            Self::Subsample(voxel) => format!("{stem} ({voxel:.3} m).ply"),
+        }
+    }
 }
 
 /// Work for the engine.
@@ -149,6 +179,50 @@ pub(crate) enum Job {
         /// colours painted at its old position would be describing
         /// somewhere it no longer is.
         pose: Se3,
+    },
+    /// Find which points of a cloud fall inside a shape drawn on screen.
+    Select {
+        /// Which request this is.
+        id: u64,
+        /// The cloud being selected from.
+        from: Held,
+        /// World to clip, column-major, with the cloud's model folded in.
+        matrix: [f32; 16],
+        /// The viewport, in the pixels the shape is measured in.
+        viewport: [f32; 2],
+        /// The shape, closed implicitly.
+        polygon: Vec<[f32; 2]>,
+        /// The cross-section in force, so what is selected is what was
+        /// visible.
+        slab: ([f32; 3], f32, f32),
+    },
+    /// Find the point nearest a place on the screen.
+    Pick {
+        /// Which request this is.
+        id: u64,
+        /// The cloud being picked from.
+        from: Held,
+        /// World to clip, column-major, with the cloud's model folded in.
+        matrix: [f32; 16],
+        /// The viewport, in the pixels `at` is measured in.
+        viewport: [f32; 2],
+        /// Where the pointer was.
+        at: [f32; 2],
+        /// The cross-section in force.
+        slab: ([f32; 3], f32, f32),
+    },
+    /// Make a new cloud from an existing one.
+    ///
+    /// No request identifier: it is one pass over a cloud, it lands in the
+    /// scene list like any other load, and there is nothing to supersede
+    /// it with.
+    Derive {
+        /// What it comes from.
+        from: Held,
+        /// What is done to it.
+        how: Derivation,
+        /// What the result is called.
+        name: String,
     },
     /// Register one surface onto another and report what the answer is worth.
     Register {
@@ -199,6 +273,22 @@ pub(crate) enum Event {
         id: u64,
         /// How far it has got.
         step: Step,
+    },
+    /// A picked point arrived, or nothing was near enough.
+    Picked {
+        /// Which request.
+        id: u64,
+        /// Where it is, in absolute coordinates.
+        at: Option<[f64; 3]>,
+    },
+    /// A selection arrived.
+    Selected {
+        /// Which request.
+        id: u64,
+        /// Which cloud the indices are into.
+        entry: u64,
+        /// The points inside the shape.
+        indices: Arc<Vec<u32>>,
     },
     /// A distance field arrived.
     Measured {

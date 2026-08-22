@@ -20,7 +20,7 @@ use rigidity_pipeline::{
 
 use rigidity_spatial::KdTree;
 
-use super::job::Held;
+use super::job::{Derivation, Held};
 
 /// How many points are measured between two progress reports.
 const DISTANCE_CHUNK: usize = 8_192;
@@ -240,6 +240,169 @@ impl Session {
         progress(count, count);
         Ok(Some(values))
     }
+}
+
+/// Which points of a cloud fall inside a shape drawn on the screen.
+///
+/// The test is done where the shape was drawn — in viewport pixels, after
+/// projection — because that is where the person drew it. Doing it in
+/// three dimensions would need a frustum and would still answer a
+/// different question from the one they asked.
+///
+/// Points the cross-section hid are not selected. What is on screen is
+/// what a lasso round it means.
+pub(crate) fn select(
+    from: &PointCloud,
+    matrix: &[f32; 16],
+    viewport: [f32; 2],
+    polygon: &[[f32; 2]],
+    slab: &([f32; 3], f32, f32),
+    stale: &dyn Fn() -> bool,
+) -> Option<Vec<u32>> {
+    if polygon.len() < 3 {
+        return Some(Vec::new());
+    }
+    let (normal, near, far) = *slab;
+    let sectioned = far > near;
+
+    let (x, y, z) = from.columns();
+    let mut inside = Vec::new();
+    for index in 0..from.len() {
+        if index.is_multiple_of(SELECT_CHUNK) && stale() {
+            return None;
+        }
+        let (px, py, pz) = (x[index], y[index], z[index]);
+        if sectioned {
+            let along = px * normal[0] + py * normal[1] + pz * normal[2];
+            if along < near || along > far {
+                continue;
+            }
+        }
+
+        // Column-major, as the shader reads it.
+        let w = matrix[3] * px + matrix[7] * py + matrix[11] * pz + matrix[15];
+        if w <= 0.0 {
+            // Behind the eye. Projecting it would put it back on screen,
+            // mirrored, and select things nobody could see.
+            continue;
+        }
+        let clip_x = matrix[0] * px + matrix[4] * py + matrix[8] * pz + matrix[12];
+        let clip_y = matrix[1] * px + matrix[5] * py + matrix[9] * pz + matrix[13];
+        let at = [
+            (clip_x / w * 0.5 + 0.5) * viewport[0],
+            (0.5 - clip_y / w * 0.5) * viewport[1],
+        ];
+        if encloses(polygon, at) {
+            inside.push(index as u32);
+        }
+    }
+    Some(inside)
+}
+
+/// How many points are tested between two cancellation checks.
+const SELECT_CHUNK: usize = 16_384;
+
+/// Whether a closed polygon encloses a point, by crossing number.
+///
+/// A self-crossing lasso is not an error and is not rejected: the
+/// even-odd rule gives it a meaning, and a freehand shape that touches
+/// itself once is far more common than one drawn on purpose.
+fn encloses(polygon: &[[f32; 2]], at: [f32; 2]) -> bool {
+    let mut inside = false;
+    let mut previous = polygon[polygon.len() - 1];
+    for corner in polygon {
+        if (corner[1] > at[1]) != (previous[1] > at[1]) {
+            let span = previous[1] - corner[1];
+            if span != 0.0 {
+                let crossing = (previous[0] - corner[0]) * (at[1] - corner[1]) / span + corner[0];
+                if at[0] < crossing {
+                    inside = !inside;
+                }
+            }
+        }
+        previous = *corner;
+    }
+    inside
+}
+
+/// The point nearest a place on the screen, if anything is near enough.
+///
+/// The same projection the lasso uses, asking a smaller question. Nearest
+/// *on screen* rather than nearest along the ray: the person clicked at a
+/// place in a picture, and the point they meant is the one that looks
+/// closest to where they clicked. Ties in the picture are broken by depth,
+/// so the front surface wins over the back of the same wall.
+pub(crate) fn nearest(
+    from: &PointCloud,
+    matrix: &[f32; 16],
+    viewport: [f32; 2],
+    at: [f32; 2],
+    radius: f32,
+    slab: &([f32; 3], f32, f32),
+) -> Option<na::Vector3<f64>> {
+    let (normal, near, far) = *slab;
+    let sectioned = far > near;
+    let (x, y, z) = from.columns();
+
+    let mut best: Option<(f32, f32, usize)> = None;
+    for index in 0..from.len() {
+        let (px, py, pz) = (x[index], y[index], z[index]);
+        if sectioned {
+            let along = px * normal[0] + py * normal[1] + pz * normal[2];
+            if along < near || along > far {
+                continue;
+            }
+        }
+        let w = matrix[3] * px + matrix[7] * py + matrix[11] * pz + matrix[15];
+        if w <= 0.0 {
+            continue;
+        }
+        let screen = [
+            ((matrix[0] * px + matrix[4] * py + matrix[8] * pz + matrix[12]) / w * 0.5 + 0.5)
+                * viewport[0],
+            (0.5 - (matrix[1] * px + matrix[5] * py + matrix[9] * pz + matrix[13]) / w * 0.5)
+                * viewport[1],
+        ];
+        let away = (screen[0] - at[0]).hypot(screen[1] - at[1]);
+        if away > radius {
+            continue;
+        }
+        // Reverse-Z: a larger clip depth is nearer the eye.
+        let depth = (matrix[2] * px + matrix[6] * py + matrix[10] * pz + matrix[14]) / w;
+        if best.is_none_or(|(_, front, _)| depth > front) {
+            best = Some((away, depth, index));
+        }
+    }
+    best.map(|(_, _, index)| from.point(index))
+}
+
+/// A new cloud made from an old one.
+///
+/// Attributes are not carried over, for the same reason downsampling drops
+/// them: whether a column survives depends on what it means, and the cloud
+/// does not know.
+pub(crate) fn derive(from: &PointCloud, how: &Derivation) -> Result<PointCloud, PipelineError> {
+    let selected = |indices: &[u32], keep: bool| {
+        let mut wanted = vec![!keep; from.len()];
+        for index in indices {
+            if let Some(slot) = wanted.get_mut(*index as usize) {
+                *slot = keep;
+            }
+        }
+        let mut out = PointCloud::with_capacity(from.len());
+        out.rebase(from.origin());
+        for (index, take) in wanted.iter().enumerate() {
+            if *take {
+                out.push(from.point(index));
+            }
+        }
+        out
+    };
+    Ok(match how {
+        Derivation::Keep(indices) => selected(indices, true),
+        Derivation::Drop(indices) => selected(indices, false),
+        Derivation::Subsample(voxel) => rigidity_core::voxel::voxel_downsample(from, *voxel)?,
+    })
 }
 
 /// Prepares a cloud, unless the cache already holds exactly that.
@@ -586,6 +749,91 @@ mod tests {
             )
             .expect("a cancellation is not a failure");
         assert!(outcome.is_none());
+    }
+
+    /// A rectangular lasso selects exactly the points inside it.
+    ///
+    /// Counted twice, the second time without going near the projection:
+    /// with an identity matrix a point at `x` lands at
+    /// `(x·0.5 + 0.5)·width`, so the same rectangle is a range in `x` and
+    /// `y` that can be tested directly. The two counts must agree exactly
+    /// — this is a question with a right answer, not a tolerance.
+    #[test]
+    fn a_rectangular_lasso_selects_what_is_inside_it() {
+        const SIDE: usize = 200;
+        let mut cloud = PointCloud::new();
+        for row in 0..SIDE {
+            for column in 0..SIDE {
+                let x = -1.0 + 2.0 * (column as f64 + 0.5) / SIDE as f64;
+                let y = -1.0 + 2.0 * (row as f64 + 0.5) / SIDE as f64;
+                cloud.push(na::Vector3::new(x, y, 0.0));
+            }
+        }
+
+        let identity: [f32; 16] = *na::Matrix4::identity().as_slice().first_chunk().unwrap();
+        let viewport = [100.0, 100.0];
+        // The upper-right quadrant of the screen, which is x > 0 and
+        // y > 0 in the cloud — pixel y counts downwards.
+        let polygon = [[50.0, 0.0], [100.0, 0.0], [100.0, 50.0], [50.0, 50.0]];
+
+        let inside = select(
+            &cloud,
+            &identity,
+            viewport,
+            &polygon,
+            &([0.0; 3], 0.0, 0.0),
+            &|| false,
+        )
+        .expect("the selection was abandoned with nothing to abandon it");
+
+        let expected = (0..cloud.len())
+            .filter(|index| {
+                let point = cloud.point(*index);
+                point.x > 0.0 && point.y > 0.0
+            })
+            .count();
+        assert_eq!(inside.len(), expected);
+        assert_eq!(
+            expected,
+            SIDE * SIDE / 4,
+            "the fixture is not what it looks like"
+        );
+    }
+
+    /// Keeping and deleting partition the cloud, and neither touches it.
+    ///
+    /// The whole of stage two rests on this: every operation makes a new
+    /// entry and leaves its input alone, which is what buys the
+    /// application its missing undo stack.
+    #[test]
+    fn deriving_leaves_the_original_alone() {
+        let scene = Scene::generate(
+            SceneKind::Plane,
+            SceneParams {
+                points_per_face: 5_000,
+                ..SceneParams::default()
+            },
+        );
+        let original = scene.cloud;
+        let before = original.len();
+        let indices: Arc<Vec<u32>> = Arc::new((0..before as u32).step_by(3).collect());
+
+        let kept =
+            derive(&original, &Derivation::Keep(Arc::clone(&indices))).expect("keeping failed");
+        let rest =
+            derive(&original, &Derivation::Drop(Arc::clone(&indices))).expect("deleting failed");
+
+        assert_eq!(original.len(), before, "the input was modified");
+        assert_eq!(kept.len(), indices.len());
+        assert_eq!(
+            kept.len() + rest.len(),
+            before,
+            "the two halves do not add up to the whole"
+        );
+        // The kept points are the ones asked for, in order.
+        for (position, index) in indices.iter().enumerate() {
+            assert_eq!(kept.point(position), original.point(*index as usize));
+        }
     }
 
     /// The correction multiplies the noise and nothing else.

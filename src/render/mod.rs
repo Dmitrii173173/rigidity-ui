@@ -42,7 +42,14 @@ struct Frame {
     point_size: f32,
     edl_strength: f32,
     edl_radius: f32,
+    // `vec3` in a uniform block is aligned to sixteen bytes, so the
+    // padding before it is part of the layout rather than an oversight,
+    // and both shaders declare the same.
     _pad: [f32; 3],
+    slab_normal: [f32; 3],
+    slab_near: f32,
+    slab_far: f32,
+    _tail: [f32; 3],
 }
 
 /// Where one cloud sits and how it is coloured. 112 bytes.
@@ -488,6 +495,9 @@ pub(crate) struct ViewportCallback {
     pub(crate) edl_strength: f32,
     /// Its sampling radius in pixels.
     pub(crate) edl_radius: f32,
+    /// The cross-section: a unit normal and the two offsets along it that
+    /// bound what is drawn. Equal offsets mean no cross-section.
+    pub(crate) slab: ([f32; 3], f32, f32),
 }
 
 impl CallbackTrait for ViewportCallback {
@@ -515,6 +525,10 @@ impl CallbackTrait for ViewportCallback {
                 edl_strength: self.edl_strength,
                 edl_radius: self.edl_radius,
                 _pad: [0.0; 3],
+                slab_normal: self.slab.0,
+                slab_near: self.slab.1,
+                slab_far: self.slab.2,
+                _tail: [0.0; 3],
             }),
         );
 

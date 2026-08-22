@@ -17,6 +17,9 @@ struct Frame {
     point_size: f32,
     edl_strength: f32,
     edl_radius: f32,
+    slab_normal: vec3<f32>,
+    slab_near: f32,
+    slab_far: f32,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;

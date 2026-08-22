@@ -30,7 +30,7 @@ without stage 2 has nowhere to put its scans.
 | **Stage 2 — the workbench** | | |
 | W1 — Many clouds | **done** | scene list, roles as chips, one buffer per cloud |
 | W2 — Scalar fields | **done** | ramps, histogram, cloud-to-cloud distance |
-| W3 — Selection and geometry | not started | crop, cross-section, measure, subsample |
+| W3 — Selection and geometry | **done** | lasso, cross-section, measure, subsample |
 | W4 — Manual alignment | not started | point-pair picking; the answer to a wrong basin |
 | W5 — Formats | not started | LAS/LAZ, E57, PCD, export |
 | **Stage 3 — the survey** | | |
@@ -863,13 +863,41 @@ Not built: reading LAS, and with it intensity. The path is generic —
 anything in `PointCloud::attributes` appears in the picker by name — so
 intensity arrives with the format at W5 and needs nothing here.
 
-**W3 — Selection and geometry.** Box and lasso selection in screen space,
-keep or delete producing a *new* cloud; a cross-section as two clipping
-planes with a thickness slider; point-to-point measurement; voxel
-subsampling, which the core already does deterministically.
-*Gate:* a box crop's point count matches an independent count over the same
-box, the original cloud is still in the list unchanged afterwards, and the
-cross-section moves at 60 fps over a million points.
+**W3 — Selection and geometry. Done.** Shift and drag draws a lasso;
+whatever it encloses can be kept or deleted into a new cloud. A
+cross-section cuts a slab of the scene without removing anything. `M` arms
+a measurement, and two clicks give the distance between two points, drawn
+where it was taken. Subsampling makes a new cloud at the voxel size the
+inspector already shows.
+*Gate: passed on all three.*
+
+- **The count is exact, and counted twice.** A test lassoes the upper-right
+  quadrant of a grid with an identity projection and compares against a
+  count taken without going near the projection at all — `assert_eq`, not a
+  tolerance, because this is a question with a right answer.
+- **The original is untouched**, and the test says something stronger: keep
+  and delete *partition* it, `kept.len() + rest.len() == before`, and the
+  kept points are the ones asked for in the order asked. That invariant is
+  what stage two's missing undo stack rests on.
+- **The cross-section is free.** 1 050 000 points, four seconds of
+  orbiting: 8.34 ms median with the slab on, 8.34 ms with it off. It is a
+  test in the vertex stage, so a clipped point costs less than a drawn one
+  — the p95 is *better* with it on (8.69 ms against 16.74 ms), because
+  fewer splats reach the rasteriser.
+
+**One gesture, not two.** This plan asked for box *and* lasso selection.
+There is one: the lasso. A box is a shape a lasso can trace, a lasso does
+things a box cannot, and two gestures would need a mode to choose between
+them. The gate's "box crop" is a lasso with four corners, which is exactly
+what the test draws.
+
+**A correction to M5.** Three things that milestone claimed — the failure
+banner, the drop overlay and the two-line empty state — were not in the
+code. A patch had failed to apply and nothing caught it: the tests do not
+touch the viewport, and the screenshots taken to check M5 happened to show
+neither a failure nor a drag. They are there now, added here. The lesson is
+not about the patch; it is that "I wrote it" and "it is in the binary" are
+different claims, and only the second one counts.
 
 **W4 — Manual alignment.** Pick three or more corresponding point pairs
 across two clouds; solve absolute orientation in closed form (Horn/Kabsch,

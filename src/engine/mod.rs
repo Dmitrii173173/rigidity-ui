@@ -25,7 +25,7 @@ use rigidity_scenes::{Scene, SceneKind, SceneParams};
 pub(crate) mod job;
 pub(crate) mod session;
 
-pub(crate) use job::{Demo, Event, Held, Job, Lane, Step};
+pub(crate) use job::{Demo, Derivation, Event, Held, Job, Lane, Step};
 use session::Session;
 
 /// A handle to the worker thread.
@@ -98,6 +98,54 @@ impl Engine {
         id
     }
 
+    /// Queues a selection.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select(
+        &mut self,
+        from: Held,
+        matrix: [f32; 16],
+        viewport: [f32; 2],
+        polygon: Vec<[f32; 2]>,
+        slab: ([f32; 3], f32, f32),
+    ) -> u64 {
+        let id = self.issue(Lane::Scene);
+        self.send(Job::Select {
+            id,
+            from,
+            matrix,
+            viewport,
+            polygon,
+            slab,
+        });
+        id
+    }
+
+    /// Queues a pick.
+    pub(crate) fn pick(
+        &mut self,
+        from: Held,
+        matrix: [f32; 16],
+        viewport: [f32; 2],
+        at: [f32; 2],
+        slab: ([f32; 3], f32, f32),
+    ) -> u64 {
+        let id = self.issue(Lane::Scene);
+        self.send(Job::Pick {
+            id,
+            from,
+            matrix,
+            viewport,
+            at,
+            slab,
+        });
+        id
+    }
+
+    /// Queues a new cloud made from an old one.
+    pub(crate) fn derive(&self, from: Held, how: Derivation, name: String) {
+        self.send(Job::Derive { from, how, name });
+    }
+
     /// Queues a distance field, superseding any earlier request.
     pub(crate) fn measure(&mut self, from: Held, to: Held, pose: Se3) -> u64 {
         let id = self.issue(Lane::Measure);
@@ -136,6 +184,7 @@ impl Engine {
     pub(crate) fn cancel(&mut self) {
         self.issue(Lane::Report);
         self.issue(Lane::Measure);
+        self.issue(Lane::Scene);
     }
 
     /// Everything reported since the last frame.
@@ -194,6 +243,65 @@ fn run(
             let event = match session.distances(&from, &to, &pose, &stale, &mut progress) {
                 Ok(Some(values)) => Event::Measured { id, entry, values },
                 Ok(None) => Event::Abandoned { id },
+                Err(error) => Event::Failed(error),
+            };
+            emit(events, ctx, event);
+        }
+
+        Job::Select {
+            id,
+            from,
+            matrix,
+            viewport,
+            polygon,
+            slab,
+        } => {
+            let stale = || wanted[Lane::Scene.index()].load(Ordering::Relaxed) != id;
+            let entry = from.generation;
+            let event =
+                match session::select(&from.cloud, &matrix, viewport, &polygon, &slab, &stale) {
+                    Some(indices) => Event::Selected {
+                        id,
+                        entry,
+                        indices: Arc::new(indices),
+                    },
+                    None => Event::Abandoned { id },
+                };
+            emit(events, ctx, event);
+        }
+
+        Job::Pick {
+            id,
+            from,
+            matrix,
+            viewport,
+            at,
+            slab,
+        } => {
+            // Ten points of slack: a click is not a pixel, and a cloud
+            // dense enough to look solid still has gaps a click can fall
+            // into.
+            let found = session::nearest(&from.cloud, &matrix, viewport, at, 10.0, &slab);
+            emit(
+                events,
+                ctx,
+                Event::Picked {
+                    id,
+                    at: found.map(|point| [point.x, point.y, point.z]),
+                },
+            );
+        }
+
+        Job::Derive { from, how, name } => {
+            let start = Instant::now();
+            let event = match session::derive(&from.cloud, &how) {
+                Ok(cloud) => Event::Loaded {
+                    path: PathBuf::from(name),
+                    generated: true,
+                    bounds: bounds_of(&cloud),
+                    cloud: Arc::new(cloud),
+                    seconds: start.elapsed().as_secs_f64(),
+                },
                 Err(error) => Event::Failed(error),
             };
             emit(events, ctx, event);

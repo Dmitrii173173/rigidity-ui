@@ -23,7 +23,7 @@ use rigidity_pipeline::{PipelineError, PrepareParams, RegisterParams, ReportPara
 use crate::bench::Bench;
 use crate::commands::{Command, Commands};
 use crate::engine::session::{Registration, Surface};
-use crate::engine::{Demo, Engine, Event, Held, Step};
+use crate::engine::{Demo, Derivation, Engine, Event, Held, Step};
 use crate::field::{self, Field, Source};
 use crate::render::camera::Camera;
 use crate::render::{self, CloudDraw, ViewportCallback};
@@ -80,6 +80,63 @@ enum Work {
     Idle,
     Running { id: u64, step: Option<Step> },
     Cancelled,
+}
+
+/// What a lasso enclosed.
+struct Selection {
+    /// Which cloud the indices are into.
+    entry: u64,
+    indices: Arc<Vec<u32>>,
+}
+
+/// A slab of the scene to look inside.
+///
+/// A cross-section is a view, not an edit: nothing is removed, the points
+/// outside are simply not drawn. Cutting a cloud in order to see into it
+/// and then having to undo the cut is the arrangement this avoids.
+#[derive(Debug, Clone, Copy)]
+struct Section {
+    on: bool,
+    /// Which axis of the drawing frame it cuts along.
+    axis: usize,
+    /// Where the slab sits along it, metres.
+    position: f32,
+    /// How thick it is, metres.
+    thickness: f32,
+}
+
+impl Default for Section {
+    fn default() -> Self {
+        Self {
+            on: false,
+            axis: 2,
+            position: 0.0,
+            thickness: 1.0,
+        }
+    }
+}
+
+impl Section {
+    /// The unit normal, and the two offsets along it that bound the slab.
+    ///
+    /// Equal offsets mean no cross-section, which is what the renderer
+    /// reads when this is switched off.
+    fn slab(&self) -> ([f32; 3], f32, f32) {
+        let mut normal = [0.0; 3];
+        normal[self.axis.min(2)] = 1.0;
+        if !self.on {
+            return (normal, 0.0, 0.0);
+        }
+        let half = (self.thickness * 0.5).max(1e-6);
+        (normal, self.position - half, self.position + half)
+    }
+
+    /// Fits the slab to a scene it has not seen before.
+    fn frame(&mut self, min: na::Point3<f32>, max: na::Point3<f32>) {
+        let centre = na::center(&min, &max);
+        self.position = centre[self.axis.min(2)];
+        self.thickness = ((max - min).amax() * 0.1).max(1e-3);
+    }
 }
 
 /// A distance field on its way.
@@ -160,7 +217,23 @@ pub(crate) struct App {
     iterations: Vec<IterationReport>,
     /// Which of them the viewport is showing.
     scrub: usize,
-    residual_colours: bool,
+    section: Section,
+    /// The shape being drawn, in viewport points.
+    lasso: Vec<egui::Pos2>,
+    /// What it enclosed, once the worker has answered.
+    selection: Option<Selection>,
+    /// A selection being computed.
+    selecting: Option<u64>,
+    /// A measurement in progress: the ends picked so far, in the frame
+    /// everything is drawn in.
+    ///
+    /// Cleared when a registration lands, because a distance measured
+    /// between two points is about where they were when it was taken.
+    measurement: Vec<na::Point3<f32>>,
+    /// Whether the next click adds an end to it.
+    measuring_points: bool,
+    /// A pick on its way back.
+    picking: Option<u64>,
     prepare: PrepareParams,
     report: ReportParams,
     registration: RegisterParams,
@@ -201,7 +274,13 @@ impl App {
             contribution: None,
             iterations: Vec::new(),
             scrub: 0,
-            residual_colours: false,
+            section: Section::default(),
+            lasso: Vec::new(),
+            selection: None,
+            selecting: None,
+            measurement: Vec::new(),
+            measuring_points: false,
+            picking: None,
             // The command line's defaults, deliberately. The parameters two
             // front ends disagree about first are the ones nobody typed.
             prepare: PrepareParams::default(),
@@ -432,6 +511,7 @@ impl App {
                     self.failure = None;
                     if let Some((min, max)) = self.bounds() {
                         self.camera.fit(min, max);
+                        self.section.frame(min, max);
                     }
                     self.request();
                 }
@@ -448,6 +528,29 @@ impl App {
                         && measuring.request == id
                     {
                         measuring.step = Some(step);
+                    }
+                }
+                Event::Picked { id, at } => {
+                    if self.picking == Some(id) {
+                        self.picking = None;
+                        if let Some(at) = at {
+                            let origin = self.origin();
+                            let local = na::Vector3::new(at[0], at[1], at[2]) - origin;
+                            if self.measurement.len() >= 2 {
+                                self.measurement.clear();
+                            }
+                            self.measurement.push(na::Point3::new(
+                                local.x as f32,
+                                local.y as f32,
+                                local.z as f32,
+                            ));
+                        }
+                    }
+                }
+                Event::Selected { id, entry, indices } => {
+                    if self.selecting == Some(id) {
+                        self.selecting = None;
+                        self.selection = Some(Selection { entry, indices });
                     }
                 }
                 Event::Measured { id, entry, values } => {
@@ -493,6 +596,7 @@ impl App {
                         self.work = Work::Idle;
                         // A distance measured at the old pose describes
                         // somewhere the cloud no longer is.
+                        self.measurement.clear();
                         self.remeasure();
                     }
                 }
@@ -502,6 +606,9 @@ impl App {
                     }
                     if self.measuring.is_some_and(|running| running.request == id) {
                         self.measuring = None;
+                    }
+                    if self.selecting == Some(id) {
+                        self.selecting = None;
                     }
                 }
 
@@ -682,6 +789,7 @@ impl App {
                     input.key_pressed(Key::F),
                     input.key_pressed(Key::Escape),
                     input.key_pressed(Key::Space),
+                    input.key_pressed(Key::M),
                 ],
                 input
                     .raw
@@ -703,7 +811,10 @@ impl App {
         // While the list is open the keyboard belongs to it: `f` is the
         // letter f, and escape closes the list rather than stopping a run.
         if !self.commands.is_open() {
-            let [open, fit, cancel, run] = letters;
+            let [open, fit, cancel, run, measure] = letters;
+            if measure {
+                self.run_command(Command::Measure);
+            }
             if open {
                 self.run_command(Command::Open);
             }
@@ -745,6 +856,12 @@ impl App {
         if self.source_id.is_some() {
             commands.push(Command::Swap);
         }
+        if self.selection.is_some() {
+            commands.extend([Command::Keep, Command::Drop]);
+        }
+        if !self.entries.is_empty() {
+            commands.extend([Command::Subsample, Command::Measure]);
+        }
         if matches!(self.outcome, Outcome::Registration { .. }) {
             commands.push(Command::Residuals);
         }
@@ -766,6 +883,9 @@ impl App {
                 }
             }
             Command::Cancel => {
+                self.measuring_points = false;
+                self.measurement.clear();
+                self.lasso.clear();
                 // Both lanes: one key, and the person pressing it means
                 // "stop", not "stop the one I was thinking of".
                 if matches!(self.work, Work::Running { .. }) || self.measuring.is_some() {
@@ -799,7 +919,24 @@ impl App {
                     self.colour_by(id, (!already).then_some(Source::Residual));
                 }
             }
+            Command::Keep => {
+                if let Some(indices) = self.selection.as_ref().map(|s| Arc::clone(&s.indices)) {
+                    self.derive(Derivation::Keep(indices));
+                }
+            }
+            Command::Drop => {
+                if let Some(indices) = self.selection.as_ref().map(|s| Arc::clone(&s.indices)) {
+                    self.derive(Derivation::Drop(indices));
+                }
+            }
+            Command::Subsample => self.derive(Derivation::Subsample(self.prepare.voxel)),
+            Command::Measure => {
+                self.measuring_points = !self.measuring_points;
+                self.measurement.clear();
+            }
             Command::Clear => {
+                self.selection = None;
+                self.lasso.clear();
                 self.entries.clear();
                 self.target_id = None;
                 self.source_id = None;
@@ -975,6 +1112,16 @@ impl App {
         }
         // A measurement only gets the strip when nothing louder is
         // happening, which is most of the time: it is a second or two.
+        if self.measuring_points {
+            return (
+                palette.accent,
+                match self.measurement.len() {
+                    0 => "click a point   M or esc to stop".to_owned(),
+                    1 => "click the other one".to_owned(),
+                    _ => "click again to start over   M to stop".to_owned(),
+                },
+            );
+        }
         if let Some(Measuring { step, .. }) = &self.measuring {
             let text = match step {
                 Some(Step { label, done, total }) if *total > 0 => format!(
@@ -1098,6 +1245,8 @@ impl App {
                     .show(ui, |ui| {
                         self.clouds_section(ui, palette);
                         ui.add_space(space::GROUP);
+                        self.section_section(ui, palette);
+                        ui.add_space(space::GROUP);
                         self.spectrum_section(ui, palette);
                         ui.add_space(space::GROUP);
                         self.parameters_section(ui, palette);
@@ -1120,6 +1269,37 @@ impl App {
             Outcome::Registration { outcome, .. } => Some(outcome.points),
             _ => None,
         };
+
+        // What a lasso enclosed, and the two things that can be done with
+        // it. Both make a new cloud; neither touches the one selected
+        // from, which is what makes undo unnecessary.
+        if let Some(selection) = &self.selection {
+            let name = self
+                .entry(Some(selection.entry))
+                .map_or("a cloud", Entry::name)
+                .to_owned();
+            let count = selection.indices.len();
+            ui.label(
+                RichText::new(format!("{} of {name} selected", thousands(count)))
+                    .color(palette.text)
+                    .size(11.0),
+            );
+            ui.horizontal(|ui| {
+                if quiet_button(ui, palette, "keep", "a new cloud of these points") {
+                    self.run_command(Command::Keep);
+                }
+                if quiet_button(ui, palette, "delete", "a new cloud of the rest") {
+                    self.run_command(Command::Drop);
+                }
+                if quiet_button(ui, palette, "cancel", "forget the selection") {
+                    self.selection = None;
+                }
+            });
+            ui.add_space(space::ROW);
+        } else if self.selecting.is_some() {
+            ui.label(RichText::new("selecting…").color(palette.faint).size(11.0));
+            ui.add_space(space::ROW);
+        }
 
         let mut toggled = None;
         let mut assigned = None;
@@ -1304,8 +1484,18 @@ impl App {
             if quiet_button(ui, palette, "open…", "⌘O") {
                 self.run_command(Command::Open);
             }
-            if !self.entries.is_empty() && quiet_button(ui, palette, "clear", "forget them all") {
-                self.run_command(Command::Clear);
+            if !self.entries.is_empty() {
+                if quiet_button(
+                    ui,
+                    palette,
+                    "subsample",
+                    "one point per voxel, as a new cloud",
+                ) {
+                    self.run_command(Command::Subsample);
+                }
+                if quiet_button(ui, palette, "clear", "forget them all") {
+                    self.run_command(Command::Clear);
+                }
             }
         });
 
@@ -1322,6 +1512,80 @@ impl App {
                 }
             }
         });
+    }
+
+    /// The cross-section: which way it cuts, where, and how thick.
+    fn section_section(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        heading(ui, palette, "cross-section");
+        let mut section = self.section;
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut section.on, RichText::new("on").size(11.0))
+                .on_hover_text("look inside without cutting anything")
+                .changed()
+                && section.on
+                && let Some((min, max)) = self.bounds()
+            {
+                section.frame(min, max);
+            }
+            ui.add_space(space::ROW);
+            for (axis, name) in [(0, "x"), (1, "y"), (2, "z")] {
+                let held = section.axis == axis;
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(name).size(11.0).monospace().color(if held {
+                                palette.text
+                            } else {
+                                palette.faint
+                            }),
+                        )
+                        .fill(if held {
+                            palette.line
+                        } else {
+                            Color32::TRANSPARENT
+                        }),
+                    )
+                    .clicked()
+                {
+                    section.axis = axis;
+                    if let Some((min, max)) = self.bounds() {
+                        section.frame(min, max);
+                    }
+                }
+            }
+        });
+
+        if section.on
+            && let Some((min, max)) = self.bounds()
+        {
+            let (low, high) = (min[section.axis], max[section.axis]);
+            let extent = (max - min).amax();
+            let (position, thickness) = (
+                format!("{:.2} m", section.position),
+                format!("{:.3} m", section.thickness),
+            );
+            ui.add_space(space::TIGHT);
+            slider(
+                ui,
+                palette,
+                "position",
+                &mut section.position,
+                low..=high,
+                false,
+                &position,
+            );
+            slider(
+                ui,
+                palette,
+                "thickness",
+                &mut section.thickness,
+                (extent * 1e-3)..=extent,
+                true,
+                &thickness,
+            );
+        }
+        self.section = section;
     }
 
     fn spectrum_section(&mut self, ui: &mut egui::Ui, palette: &Palette) {
@@ -1468,18 +1732,6 @@ impl App {
                         .size(10.0)
                         .monospace(),
                 );
-            }
-            ui.add_space(space::ROW);
-            let mut residuals = self.residual_colours;
-            if ui
-                .checkbox(
-                    &mut residuals,
-                    RichText::new("colour by residual").size(11.0),
-                )
-                .on_hover_text("on the downsampled source, which is what the solver used")
-                .changed()
-            {
-                self.run_command(Command::Residuals);
             }
         }
 
@@ -1663,6 +1915,32 @@ impl App {
                 centred_note(ui, palette, rect, "no gpu adapter — nothing to draw on");
                 return;
             }
+            // A failure is a typed error and gets room to say what it is.
+            // Twenty-six pixels of status strip truncate the path, which
+            // is usually the half that matters.
+            if let Some(error) = &self.failure {
+                let text = error.to_string();
+                let banner =
+                    Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.top() + 44.0));
+                ui.painter()
+                    .rect_filled(banner, 0.0, palette.low.gamma_multiply(0.16));
+                ui.painter().text(
+                    banner
+                        .shrink2(Vec2::new(f32::from(space::PANEL), 0.0))
+                        .left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    &text,
+                    egui::FontId::proportional(12.0),
+                    palette.low,
+                );
+                if ui
+                    .interact(banner, egui::Id::new("failure"), Sense::click())
+                    .on_hover_text("dismiss")
+                    .clicked()
+                {
+                    self.failure = None;
+                }
+            }
             // The measurement harness pins the clock so that two runs
             // differ only by what is being measured.
             let time = self
@@ -1672,12 +1950,60 @@ impl App {
                 .unwrap_or_else(|| ui.input(|input| input.time));
             let draws = self.draws(palette, time);
             if draws.is_empty() {
-                centred_note(ui, palette, rect, "drop a PLY file here, or ⌘O");
+                centred_note(
+                    ui,
+                    palette,
+                    rect,
+                    "drop a PLY file here · ⌘O to choose one · ⌘K for everything else",
+                );
+                centred_note_below(ui, palette, rect, "or try a demo scene on the left");
                 return;
             }
 
             let response = ui.allocate_rect(rect, Sense::click_and_drag());
             self.navigate(ui, &response, rect);
+
+            // A file being dragged over the window says so before it is
+            // let go, because the alternative is dropping and hoping.
+            if ui.input(|input| !input.raw.hovered_files.is_empty()) {
+                ui.painter()
+                    .rect_filled(rect, 0.0, palette.accent.gamma_multiply(0.12));
+                centred_note(ui, palette, rect, "drop to load");
+            }
+
+            // The measurement, drawn where it was taken.
+            if !self.measurement.is_empty() {
+                let shape = viewport_pixels(rect, ui.ctx().pixels_per_point());
+                let projection = self
+                    .camera
+                    .view_projection(shape[0] as f32 / shape[1].max(1) as f32);
+                let screen: Vec<egui::Pos2> = self
+                    .measurement
+                    .iter()
+                    .filter_map(|point| project(&projection, *point, rect))
+                    .collect();
+                for at in &screen {
+                    ui.painter().circle_filled(*at, 3.5, palette.accent);
+                }
+                if let ([first, second], [a, b]) = (&self.measurement[..], &screen[..]) {
+                    ui.painter()
+                        .line_segment([*a, *b], Stroke::new(1.5, palette.accent));
+                    ui.painter().text(
+                        a.lerp(*b, 0.5) - Vec2::new(0.0, 10.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{:.4} m", (second - first).norm()),
+                        egui::FontId::monospace(12.0),
+                        palette.accent,
+                    );
+                }
+            }
+
+            if self.lasso.len() > 1 {
+                let mut path = self.lasso.clone();
+                path.push(self.lasso[0]);
+                ui.painter()
+                    .add(egui::Shape::line(path, Stroke::new(1.5, palette.accent)));
+            }
 
             let pixels_per_point = ui.ctx().pixels_per_point();
             let size = viewport_pixels(rect, pixels_per_point);
@@ -1700,6 +2026,7 @@ impl App {
                         // crease, which is most of what there is to see in
                         // a building.
                         edl_radius: (2.0 * pixels_per_point).round().max(1.0),
+                        slab: self.section.slab(),
                     },
                 ));
         });
@@ -1807,6 +2134,34 @@ impl App {
 
     /// Mouse and wheel over the viewport.
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response, rect: Rect) {
+        // Shift and drag draws a shape instead of turning the camera. One
+        // gesture rather than two: a box is a shape a lasso can trace, and
+        // a lasso does things a box cannot, so there is nothing to choose
+        // between and no mode to be in.
+        let shifted = ui.input(|input| input.modifiers.shift);
+        if shifted && response.dragged_by(PointerButton::Primary) {
+            if let Some(at) = response.interact_pointer_pos()
+                && self.lasso.last().is_none_or(|last| last.distance(at) > 4.0)
+            {
+                // Every few points, not every frame: a freehand path
+                // sampled at 120 Hz is thousands of vertices describing a
+                // shape a hundred would.
+                self.lasso.push(at);
+            }
+            return;
+        }
+        if !self.lasso.is_empty() && !response.dragged() {
+            self.finish_lasso(ui, rect);
+        }
+
+        // Armed by ⌘K or M: a click asks the worker what is under it.
+        if self.measuring_points
+            && response.clicked()
+            && let Some(at) = response.interact_pointer_pos()
+        {
+            self.pick(ui, rect, at);
+        }
+
         let delta = response.drag_delta();
         if response.dragged_by(PointerButton::Primary) {
             self.camera.orbit([delta.x, delta.y]);
@@ -1868,6 +2223,113 @@ fn reassign(mine: Option<u64>, theirs: Option<u64>, id: u64) -> (Option<u64>, Op
         (Some(id), None)
     } else {
         (Some(id), theirs)
+    }
+}
+
+impl App {
+    /// Sends the drawn shape to be tested against a cloud.
+    ///
+    /// The test happens where the shape was drawn — in viewport pixels,
+    /// after projection — because that is where the person drew it.
+    fn finish_lasso(&mut self, ui: &egui::Ui, rect: Rect) {
+        let ppp = ui.ctx().pixels_per_point();
+        let polygon: Vec<[f32; 2]> = std::mem::take(&mut self.lasso)
+            .into_iter()
+            .map(|at| [(at.x - rect.left()) * ppp, (at.y - rect.top()) * ppp])
+            .collect();
+        if polygon.len() < 3 {
+            return;
+        }
+
+        // The cloud whose controls are open, or whatever is being
+        // registered onto. Selecting from every cloud at once would need
+        // an answer per cloud and a decision per answer.
+        let Some(entry) = self
+            .entry(self.selected)
+            .or_else(|| self.target())
+            .or_else(|| self.entries.first())
+        else {
+            return;
+        };
+        let (held, id) = (entry.held(), entry.id);
+        let pose = if self.source_id == Some(id) {
+            self.pose()
+        } else {
+            Se3::identity()
+        };
+        let model = model_matrix(&pose, entry.cloud.origin(), self.origin());
+
+        let size = viewport_pixels(rect, ppp);
+        let aspect = size[0] as f32 / size[1].max(1) as f32;
+        let matrix = self.camera.view_projection(aspect) * na::Matrix4::from_column_slice(&model);
+        let mut columns = [0.0f32; 16];
+        columns.copy_from_slice(matrix.as_slice());
+
+        self.selection = None;
+        self.selecting = Some(self.engine.select(
+            held,
+            columns,
+            [size[0] as f32, size[1] as f32],
+            polygon,
+            self.section.slab(),
+        ));
+    }
+
+    /// Asks what point is under a place on the screen.
+    fn pick(&mut self, ui: &egui::Ui, rect: Rect, at: egui::Pos2) {
+        let Some((held, matrix, size)) = self.aim(ui, rect) else {
+            return;
+        };
+        let ppp = ui.ctx().pixels_per_point();
+        self.picking = Some(self.engine.pick(
+            held,
+            matrix,
+            [size[0] as f32, size[1] as f32],
+            [(at.x - rect.left()) * ppp, (at.y - rect.top()) * ppp],
+            self.section.slab(),
+        ));
+    }
+
+    /// The cloud a screen-space question is about, and how it projects.
+    ///
+    /// The one whose controls are open, or whatever is being registered
+    /// onto. Asking every cloud at once would need an answer per cloud and
+    /// a decision per answer.
+    fn aim(&self, ui: &egui::Ui, rect: Rect) -> Option<(Held, [f32; 16], [u32; 2])> {
+        let entry = self
+            .entry(self.selected)
+            .or_else(|| self.target())
+            .or_else(|| self.entries.first())?;
+        let pose = if self.source_id == Some(entry.id) {
+            self.pose()
+        } else {
+            Se3::identity()
+        };
+        let model = model_matrix(&pose, entry.cloud.origin(), self.origin());
+
+        let size = viewport_pixels(rect, ui.ctx().pixels_per_point());
+        let aspect = size[0] as f32 / size[1].max(1) as f32;
+        let matrix = self.camera.view_projection(aspect) * na::Matrix4::from_column_slice(&model);
+        let mut columns = [0.0f32; 16];
+        columns.copy_from_slice(matrix.as_slice());
+        Some((entry.held(), columns, size))
+    }
+
+    /// Makes a new cloud from the selection, or from the whole of one.
+    fn derive(&mut self, how: Derivation) {
+        let id = match &how {
+            Derivation::Keep(_) | Derivation::Drop(_) => {
+                self.selection.as_ref().map(|selection| selection.entry)
+            }
+            Derivation::Subsample(_) => self.selected.or(self.target_id),
+        };
+        let Some(entry) = self.entry(id) else {
+            return;
+        };
+        let name = how.name(entry.name());
+        let held = entry.held();
+        self.engine.derive(held, how, name);
+        self.selection = None;
     }
 }
 
@@ -2003,6 +2465,33 @@ fn centred_note(ui: &egui::Ui, palette: &Palette, rect: Rect, text: &str) {
         text,
         egui::FontId::proportional(13.0),
         palette.faint,
+    );
+}
+
+/// Where a point in the drawing frame lands on the screen.
+fn project(
+    view_projection: &na::Matrix4<f32>,
+    point: na::Point3<f32>,
+    rect: Rect,
+) -> Option<egui::Pos2> {
+    let clip = view_projection * point.to_homogeneous();
+    if clip.w <= 0.0 {
+        return None;
+    }
+    Some(pos2(
+        rect.left() + (clip.x / clip.w * 0.5 + 0.5) * rect.width(),
+        rect.top() + (0.5 - clip.y / clip.w * 0.5) * rect.height(),
+    ))
+}
+
+/// A quieter second line under it.
+fn centred_note_below(ui: &egui::Ui, palette: &Palette, rect: Rect, text: &str) {
+    ui.painter().text(
+        rect.center() + Vec2::new(0.0, 22.0),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(11.0),
+        palette.faint.gamma_multiply(0.8),
     );
 }
 

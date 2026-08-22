@@ -17,6 +17,12 @@ struct Frame {
     point_size: f32,
     edl_strength: f32,
     edl_radius: f32,
+    // A slab to keep, in the frame everything is drawn in: the plane's
+    // unit normal, then the two offsets along it. Zero thickness — the
+    // two offsets equal — means the whole scene.
+    slab_normal: vec3<f32>,
+    slab_near: f32,
+    slab_far: f32,
 };
 
 // One cloud's placement and colouring. A registration moves the source by
@@ -56,7 +62,23 @@ fn vertex_main(
         select(-1.0, 1.0, (corner & 2u) == 2u),
     );
 
-    var clip = frame.view_projection * draw.model * vec4<f32>(x, y, z, 1.0);
+    let placed = draw.model * vec4<f32>(x, y, z, 1.0);
+
+    // Outside the cross-section: pushed behind the eye, where the
+    // rasteriser discards it. Cheaper than a fragment test, and it costs
+    // nothing at all when the slab is off.
+    if (frame.slab_far > frame.slab_near) {
+        let along = dot(placed.xyz, frame.slab_normal);
+        if (along < frame.slab_near || along > frame.slab_far) {
+            var gone: VertexOut;
+            gone.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+            gone.offset = vec2<f32>(2.0, 2.0);
+            gone.tint = vec4<f32>(0.0);
+            return gone;
+        }
+    }
+
+    var clip = frame.view_projection * placed;
 
     // Multiplying by w cancels the perspective divide that follows, so a
     // splat keeps its size in pixels however far away its point is. Points
