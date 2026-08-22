@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, Align, Color32, Key, Layout, Modifiers, PointerButton, Rect, RichText, Sense, Stroke,
-    Vec2,
+    Vec2, pos2,
 };
 use rigidity_core::PointCloud;
 use rigidity_core::icp::IterationReport;
@@ -1064,19 +1064,29 @@ impl App {
                     ui.label(RichText::new("rigidity").color(palette.text).size(15.0));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if quiet_button(ui, palette, self.mode.label(), "switch theme") {
-                            self.mode = self.mode.flipped();
-                            theme::apply(ui.ctx(), self.mode);
+                            self.run_command(Command::Theme);
                         }
-                    });
+                    })
+                    .response
+                    .rect
                 });
+
                 // Without a title bar there is nothing to move the window
-                // by, so the name at the top of the panel is it.
+                // by, so the name at the top of the panel is it — but only
+                // the part of the row with nothing in it. An interaction
+                // area added after a button and covering it takes the
+                // button's clicks, which is how this row's own theme
+                // toggle stopped working for a whole milestone.
+                let row = header.response.rect;
+                let controls = header.inner;
+                let draggable =
+                    Rect::from_min_max(row.left_top(), pos2(controls.left(), row.bottom()));
+                debug_assert!(
+                    !draggable.intersects(controls),
+                    "the window drag area covers the header's controls again"
+                );
                 if ui
-                    .interact(
-                        header.response.rect,
-                        egui::Id::new("window drag"),
-                        Sense::drag(),
-                    )
+                    .interact(draggable, egui::Id::new("window drag"), Sense::drag())
                     .drag_started()
                 {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
