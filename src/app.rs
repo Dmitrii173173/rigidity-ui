@@ -78,6 +78,14 @@ struct Entry {
     min: na::Vector3<f64>,
     max: na::Vector3<f64>,
     seconds: f64,
+    /// How this scan is prepared before the solver sees it.
+    ///
+    /// Per scan and not per application: a survey is not made of clouds at
+    /// one density, and a station taken up against a wall wants a finer
+    /// voxel than one taken across a hall. When every scan carries the same
+    /// values — which is what happens unless somebody changes one — the
+    /// behaviour is exactly what it was before they were per scan.
+    prepare: PrepareParams,
     /// A coarse copy, drawn instead while the camera is moving and the
     /// scene is over budget. `None` for a cloud small enough to be its own
     /// preview.
@@ -333,6 +341,9 @@ pub(crate) struct App {
     initial: Se3,
     /// The last file written, for the strip to say so.
     saved: Option<(String, f64)>,
+    /// What a newly loaded scan starts with, and what the sliders were
+    /// last left at. Not what any particular scan is using — that lives on
+    /// the scan; see [`Entry::prepare`].
     prepare: PrepareParams,
     report: ReportParams,
     registration: RegisterParams,
@@ -723,6 +734,14 @@ impl App {
                         generated,
                         cloud,
                         coarse,
+                        // The values the sliders were last left at. Setting
+                        // them once and then opening twenty scans gives
+                        // twenty scans that agree, which is the common case
+                        // and should cost nothing.
+                        prepare: planned
+                            .as_ref()
+                            .and_then(|scan| scan.prepare)
+                            .unwrap_or(self.prepare),
                         min: min.into(),
                         max: max.into(),
                         seconds,
@@ -940,16 +959,24 @@ impl App {
     fn request(&mut self) {
         let id = match (self.source(), self.target()) {
             (Some(source), Some(target)) => {
+                let (source_prepare, target_prepare) = (source.prepare, target.prepare);
                 let (source, target) = (source.held(), target.held());
                 let initial = self.pose();
                 self.iterations.clear();
                 self.scrub = 0;
-                self.engine
-                    .register(source, target, self.prepare, self.registration, initial)
+                self.engine.register(
+                    source,
+                    target,
+                    source_prepare,
+                    target_prepare,
+                    self.registration,
+                    initial,
+                )
             }
             (None, Some(target)) => {
+                let prepare = target.prepare;
                 let target = target.held();
-                self.engine.analyse(target, self.prepare)
+                self.engine.analyse(target, prepare)
             }
             _ => return,
         };
@@ -1226,7 +1253,15 @@ impl App {
                     self.derive(Derivation::Drop(indices));
                 }
             }
-            Command::Subsample => self.derive(Derivation::Subsample(self.prepare.voxel)),
+            Command::Subsample => {
+                // The cloud's own voxel, not the application's: the command
+                // makes a new cloud out of one scan, and which scan is the
+                // same question `derive` is about to ask.
+                let voxel = self
+                    .entry(self.selected.or(self.target_id))
+                    .map_or(self.prepare.voxel, |entry| entry.prepare.voxel);
+                self.derive(Derivation::Subsample(voxel));
+            }
             Command::Measure => {
                 self.measuring_points = !self.measuring_points;
                 self.measurement.clear();
@@ -2147,10 +2182,24 @@ impl App {
             }
         }
 
+        // The command line carries one `--voxel` for the pair, so the
+        // numbers it reproduces are the ones the *target* was prepared
+        // with. When the source disagrees the command is no longer the one
+        // that produced this screen, and it says so instead of quietly
+        // printing something that runs and gives different answers — the
+        // whole value of this button is that what it hands over matches.
+        let prepare = self
+            .target()
+            .or_else(|| self.source())
+            .map_or(self.prepare, |entry| entry.prepare);
+        let divergent = match (self.source(), self.target()) {
+            (Some(source), Some(target)) => source.prepare != target.prepare,
+            _ => false,
+        };
         let common = format!(
             "--voxel {} --neighbours {} --noise {} --tolerance {}{}",
-            self.prepare.voxel,
-            self.prepare.neighbours,
+            prepare.voxel,
+            prepare.neighbours,
             self.report.noise,
             self.report.tolerance,
             if self.report.calibration == 1.0 {
@@ -2171,6 +2220,11 @@ impl App {
                 out.push_str(&format!("rigidity analyse {} {common}", target.name()));
             }
             _ => {}
+        }
+        if divergent {
+            out.push_str(
+                "\n# the two scans are prepared differently and the command line has one\n                 # --voxel for both: this reproduces the target's settings, not the screen's",
+            );
         }
         out
     }
@@ -2216,12 +2270,22 @@ impl App {
         self.report = report;
 
         ui.add_space(space::ROW);
-        heading(ui, palette, "prepare");
+        // Which scan these belong to, said in the heading rather than
+        // implied: the sliders used to be about the application and are now
+        // about one cloud, and a control whose subject you have to work out
+        // is a control that gets set on the wrong thing.
+        let tuning = self.tuning();
+        match self.entry(tuning).map(Entry::name) {
+            Some(name) => heading(ui, palette, &format!("prepare · {name}")),
+            None => heading(ui, palette, "prepare"),
+        }
         // These do cost something: the cloud is downsampled, indexed and
         // re-normalled, and then registered again. The engine abandons
         // superseded requests at the next stage boundary, so dragging is
         // safe if not free.
-        let mut prepare = self.prepare;
+        let mut prepare = self
+            .entry(tuning)
+            .map_or(self.prepare, |entry| entry.prepare);
         let (voxel, neighbours) = (
             format!("{:.3} m", prepare.voxel),
             prepare.neighbours.to_string(),
@@ -2274,10 +2338,33 @@ impl App {
         }
 
         if changed {
+            // Written to the scan being tuned and kept as the seed for the
+            // next one loaded. Both, because a survey where every scan
+            // needs the sliders moved again is a survey nobody would tune
+            // at all.
             self.prepare = prepare;
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| Some(entry.id) == tuning)
+            {
+                self.entries[index].prepare = prepare;
+            }
             self.registration = registration;
             self.request();
         }
+    }
+
+    /// Which scan the prepare sliders are about.
+    ///
+    /// The cloud whose controls are open, then the one the report is about.
+    /// The same rule every other question of "which one" uses, so that the
+    /// answer is somewhere the person already knows to look.
+    fn tuning(&self) -> Option<u64> {
+        self.selected
+            .filter(|id| self.entry(Some(*id)).is_some())
+            .or(self.target_id)
+            .or(self.source_id)
     }
 
     /// The viewport: everything that is not a panel.
@@ -2868,6 +2955,7 @@ impl App {
                 path: entry.path.clone(),
                 pose: entry.pose,
                 visible: entry.visible,
+                prepare: (entry.prepare != PrepareParams::default()).then_some(entry.prepare),
                 role: match (self.target_id, self.source_id) {
                     (Some(id), _) if id == entry.id => project::Role::Target,
                     (_, Some(id)) if id == entry.id => project::Role::Source,

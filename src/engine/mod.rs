@@ -159,11 +159,13 @@ impl Engine {
     }
 
     /// Queues a registration, superseding any earlier request.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register(
         &mut self,
         source: Held,
         target: Held,
-        prepare: PrepareParams,
+        source_prepare: PrepareParams,
+        target_prepare: PrepareParams,
         params: RegisterParams,
         initial: Se3,
     ) -> u64 {
@@ -172,7 +174,8 @@ impl Engine {
             id,
             source,
             target,
-            prepare,
+            source_prepare,
+            target_prepare,
             params,
             initial,
         });
@@ -386,7 +389,8 @@ fn run(
             id,
             source,
             target,
-            prepare,
+            source_prepare,
+            target_prepare,
             params,
             initial,
         } => {
@@ -420,7 +424,8 @@ fn run(
             let event = match session.register(
                 &source,
                 &target,
-                &prepare,
+                &source_prepare,
+                &target_prepare,
                 &params,
                 initial,
                 &stale,

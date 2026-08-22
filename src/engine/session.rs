@@ -137,11 +137,13 @@ impl Session {
     /// answered after the next accepted step instead of after the whole
     /// solve.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register(
         &mut self,
         source: &Held,
         target: &Held,
-        prepare_params: &PrepareParams,
+        source_prepare: &PrepareParams,
+        target_prepare: &PrepareParams,
         params: &RegisterParams,
         initial: Se3,
         stale: &dyn Fn() -> bool,
@@ -151,11 +153,15 @@ impl Session {
         if stale() {
             return Ok(None);
         }
-        prepare(&mut self.target, target, prepare_params, progress)?;
+        // One set of parameters each. A survey is not made of scans at one
+        // density: a station taken close to a wall and one taken across a
+        // hall want different voxels, and forcing the pair to agree means
+        // the coarser of the two decides for both.
+        prepare(&mut self.target, target, target_prepare, progress)?;
         if stale() {
             return Ok(None);
         }
-        prepare(&mut self.source, source, prepare_params, progress)?;
+        prepare(&mut self.source, source, source_prepare, progress)?;
         if stale() {
             return Ok(None);
         }
@@ -600,6 +606,11 @@ mod tests {
             .register(
                 &held(&source, 1),
                 &held(&target, 2),
+                // The same values on both sides: that is what the command
+                // line does, and parity with it is what these tests are
+                // for. A pair prepared two ways is a thing only the viewer
+                // can express, and it is not this test's subject.
+                &prepare,
                 &prepare,
                 &params,
                 Se3::identity(),
@@ -887,6 +898,11 @@ mod tests {
             .register(
                 &source,
                 &target,
+                // The same values on both sides: that is what the command
+                // line does, and parity with it is what these tests are
+                // for. A pair prepared two ways is a thing only the viewer
+                // can express, and it is not this test's subject.
+                &prepare,
                 &prepare,
                 &params,
                 Se3::identity(),
@@ -924,6 +940,7 @@ mod tests {
                 &source,
                 &target,
                 &prepare,
+                &prepare,
                 &params,
                 start,
                 &|| false,
@@ -953,6 +970,63 @@ mod tests {
     /// independent, not about how accurate the application needs to be, and
     /// a viewer that applied it to the tolerance instead would classify
     /// every scene wrongly while looking entirely plausible.
+    /// Each side is prepared with its own voxel, and both reach the solver.
+    ///
+    /// The whole of the per-scan parameter change is that two numbers
+    /// travel where one did. Nothing about the pose or the residual would
+    /// notice if the second were dropped on the way and the first used for
+    /// both — the run would converge and look right — so what is asserted
+    /// is the count each side kept, which is the one number that can only
+    /// come from that side's own voxel.
+    #[test]
+    fn a_pair_is_prepared_one_voxel_each() {
+        let (source, target, _) = corridor_pair("per-scan-voxel");
+        let held = |path: &PathBuf, generation: u64| Held {
+            cloud: Arc::new(rigidity_io::read_ply(path).expect("the fixture would not read")),
+            generation,
+        };
+        let coarse = PrepareParams {
+            voxel: 0.20,
+            neighbours: 16,
+        };
+        let fine = PrepareParams {
+            voxel: 0.05,
+            neighbours: 16,
+        };
+
+        let run = |source_prepare: PrepareParams, target_prepare: PrepareParams| {
+            Session::default()
+                .register(
+                    &held(&source, 1),
+                    &held(&target, 2),
+                    &source_prepare,
+                    &target_prepare,
+                    &RegisterParams::default(),
+                    Se3::identity(),
+                    &|| false,
+                    &mut |_| {},
+                    &mut |_| {},
+                )
+                .expect("the registration failed")
+                .expect("the registration was abandoned")
+                .points
+        };
+
+        // What each voxel gives when both sides use it, so the mixed run
+        // below has something to be equal to rather than merely different
+        // from.
+        let [both_coarse, _] = run(coarse, coarse);
+        let [_, both_fine] = run(fine, fine);
+        assert!(
+            both_coarse < both_fine,
+            "the coarse voxel kept {both_coarse} and the fine one {both_fine}"
+        );
+
+        let [moving, fixed] = run(coarse, fine);
+        assert_eq!(moving, both_coarse, "the source did not use its own voxel");
+        assert_eq!(fixed, both_fine, "the target did not use its own voxel");
+    }
+
     #[test]
     fn the_calibration_only_scales_the_noise() {
         let plain = ReportParams::default();

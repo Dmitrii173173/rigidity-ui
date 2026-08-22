@@ -16,10 +16,11 @@ This application exists to make the ambiguous direction visible.
 cargo run --release -- target.ply source.ply
 ```
 
-PLY, LAS, LAZ, E57, PCD and CSV go in; everything but CSV comes out again —
-**save a cloud to a file…** in `⌘K`, where the extension you type chooses
-the format. A cloud saved as `.laz` is compressed and one saved as `.e57`
-is not, and there is no second control anywhere to say so.
+PLY, LAS, LAZ, E57, PCD and delimited text — `.txt` or `.csv` — go in, and
+every one of them comes out again: **save a cloud to a file…** in `⌘K`,
+where the extension you type chooses the format. A cloud saved as `.laz` is
+compressed and one saved as `.e57` is not, and there is no second control
+anywhere to say so.
 
 Or open it with nothing and press the **corridor** demo: it builds a scene
 whose null space is known analytically, and a copy of it displaced by a
@@ -102,6 +103,7 @@ rigidity-project 1
 
 scan  scans/station-00.laz
 pose  1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0
+voxel 0.03
 role  target
 shown yes
 ```
@@ -115,6 +117,16 @@ not a matter of taste: a twist would round-trip through `exp` and `log` and
 come back *near* where it started, and a project that drifts every time it
 is saved cannot be used to measure drift. Twenty scans reopen at the same
 bits, and there is a test that says so.
+
+Each scan carries its own preparation, because a survey is not made of
+clouds at one density: a station taken up against a wall wants a finer
+voxel than one taken across a hall, and making the pair agree lets the
+coarser of the two decide for both. The **prepare** sliders name the scan
+they are about and a new scan starts at whatever they were last left at, so
+setting them once and opening twenty scans still gives twenty scans that
+agree. Only a scan tuned away from the default writes `voxel` and
+`neighbours` into the project — a file that spells out values nobody chose
+reads as though somebody did.
 
 A registration is not written until it is **placed** — `⌘K`, *place the
 source where the registration put it* — which moves the scan's own pose to

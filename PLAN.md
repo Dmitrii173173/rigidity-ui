@@ -26,7 +26,7 @@ without stage 2 has nowhere to put its scans.
 | M3 — Registration | **done** | live ICP, timeline, residuals, basin warning |
 | M4 — Null-space visualisation | **done** | hover to move, |n·v| colouring, demos |
 | M5 — Polish | **done** | ⌘K, both themes measured, errors, README |
-| M6 — Packaging | **done** | `.app` bundle, generated icon, CI (needs a remote) |
+| M6 — Packaging | **done** | `.app` bundle, generated icon, CI green on three OSes |
 | **Stage 2 — the workbench** | | |
 | W1 — Many clouds | **done** | scene list, roles as chips, one buffer per cloud |
 | W2 — Scalar fields | **done** | ramps, histogram, cloud-to-cloud distance |
@@ -34,7 +34,7 @@ without stage 2 has nowhere to put its scans.
 | W4 — Manual alignment | **done** | point pairs, Kabsch upstream, the wrong basin escaped |
 | W5 — Formats | **done** | LAS/LAZ, E57, PCD, export; one door for all of them |
 | **Stage 3 — the survey** | | |
-| S1 — Projects | **gate passed** | poses bit-identical; LOD decided and built; per-scan parameters outstanding |
+| S1 — Projects | **done** | poses bit-identical, parameters per scan, LOD decided and built |
 | S2 — Pose graph | not started | degeneracy-weighted edges — the actual contribution |
 | S3 — Loop closure | not started | manual first, detected later |
 | S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
@@ -1010,11 +1010,27 @@ the file gave it and the solver starts from the survey rather than from the
 identity. And placing a registration must not move anything either — it
 changes what a position is attributed to, not the position.
 
-Still outstanding: **per-scan parameters.** `PrepareParams` is one setting
-for the whole application, and the milestone asks for one per scan. Nothing
-in the format prevents it — a `voxel` key beside `pose` — but the inspector
-would need per-cloud controls and the analysis would need to read them, and
-neither is what the gate was about.
+**Parameters per scan** came with it. `PrepareParams` moved from the
+application to the `Entry`, and `register` takes one for each side rather
+than one for the pair: a survey is not made of clouds at one density, and
+making the pair agree lets the coarser of the two decide for both. The
+sliders name the scan they are about and leave their values as the seed for
+the next scan loaded, so the common case — twenty scans that agree — still
+costs one adjustment.
+
+What that test asserts is the point count each side kept, not the pose. A
+run where the second set of parameters was dropped on the way and the first
+used for both would converge and look entirely right; the kept count is the
+only number that can come from nothing but that side's own voxel.
+
+Two smaller consequences, both recorded rather than smoothed over. Only a
+scan tuned away from the default writes `voxel` and `neighbours` into the
+project, because a file that spells out values nobody chose reads as though
+somebody did — and a reader that helpfully filled in the defaults would make
+every project ever saved immune to the next release changing one. And the
+copied command line carries one `--voxel` for a pair: when the two scans
+disagree it reproduces the target's settings and says so in a comment,
+rather than printing something that runs and gives different numbers.
 
 ### The level-of-detail decision — made against measurements
 

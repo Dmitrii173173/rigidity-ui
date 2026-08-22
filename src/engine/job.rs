@@ -239,8 +239,14 @@ pub(crate) enum Job {
         source: Held,
         /// What it moves onto.
         target: Held,
-        /// How to prepare both.
-        prepare: PrepareParams,
+        /// How to prepare the source.
+        source_prepare: PrepareParams,
+        /// How to prepare the target.
+        ///
+        /// Separately, because a scan taken up against a wall and one taken
+        /// across a hall are not the same density, and making the pair
+        /// agree lets the coarser of the two decide for both.
+        target_prepare: PrepareParams,
         /// How to register them.
         params: RegisterParams,
         /// Where to start from.

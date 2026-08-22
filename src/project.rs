@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use rigidity_core::lie::{Se3, So3};
 use rigidity_core::nalgebra as na;
+use rigidity_pipeline::PrepareParams;
 
 /// The only version this code writes, and the only one it reads.
 ///
@@ -81,6 +82,12 @@ pub(crate) struct Scan {
     pub(crate) pose: Se3,
     pub(crate) visible: bool,
     pub(crate) role: Role,
+    /// How the scan is prepared, when it was tuned away from the default.
+    ///
+    /// Absent rather than defaulted: a file that spells out values nobody
+    /// chose reads as though somebody did, and the next release changing a
+    /// default would silently not reach any project ever saved.
+    pub(crate) prepare: Option<PrepareParams>,
 }
 
 /// A scene, saved.
@@ -191,6 +198,12 @@ impl Project {
                 out.push(' ');
                 out.push_str(&number(translation[axis]));
             }
+            if let Some(prepare) = scan.prepare {
+                out.push_str("\nvoxel ");
+                out.push_str(&number(prepare.voxel));
+                out.push_str("\nneighbours ");
+                out.push_str(&prepare.neighbours.to_string());
+            }
             out.push_str("\nrole  ");
             out.push_str(scan.role.word());
             out.push_str("\nshown ");
@@ -241,6 +254,7 @@ impl Project {
                     pose: Se3::identity(),
                     visible: true,
                     role: Role::Idle,
+                    prepare: None,
                 });
                 continue;
             }
@@ -258,6 +272,36 @@ impl Project {
 
             match key {
                 "pose" => scan.pose = pose(rest, number)?,
+                "voxel" => {
+                    let value: f64 = rest.parse().map_err(|_| Error::Line {
+                        number,
+                        problem: "a voxel is one number, in metres",
+                    })?;
+                    if !(value.is_finite() && value > 0.0) {
+                        return Err(Error::Line {
+                            number,
+                            problem: "a voxel has to be finite and greater than zero",
+                        });
+                    }
+                    scan.prepare
+                        .get_or_insert_with(PrepareParams::default)
+                        .voxel = value;
+                }
+                "neighbours" => {
+                    let value: usize = rest.parse().map_err(|_| Error::Line {
+                        number,
+                        problem: "neighbours is a whole number",
+                    })?;
+                    if value < 3 {
+                        return Err(Error::Line {
+                            number,
+                            problem: "a plane needs at least three neighbours",
+                        });
+                    }
+                    scan.prepare
+                        .get_or_insert_with(PrepareParams::default)
+                        .neighbours = value;
+                }
                 "role" => {
                     scan.role = Role::parse(rest).ok_or(Error::Line {
                         number,
@@ -381,6 +425,13 @@ mod tests {
                         1 => Role::Source,
                         _ => Role::Idle,
                     },
+                    // Every third scan tuned away from the default, so the
+                    // round trip is asked to carry both the presence and
+                    // the absence of parameters.
+                    prepare: (index % 3 == 0).then(|| PrepareParams {
+                        voxel: 0.01 + index as f64 * 0.001,
+                        neighbours: 8 + index,
+                    }),
                 }
             })
             .collect::<Vec<_>>()
@@ -444,6 +495,48 @@ mod tests {
         assert_eq!(after.scans[2].role, Role::Idle);
         assert!(!after.scans[0].visible, "index 0 was hidden");
         assert!(after.scans[1].visible);
+
+        // Parameters, both when a scan has them and when it does not. The
+        // absent case is the one worth asserting: a reader that helpfully
+        // filled in the defaults would make every project immune to the
+        // next release changing one.
+        for (index, (before, after)) in survey().scans.iter().zip(&after.scans).enumerate() {
+            assert_eq!(before.prepare, after.prepare, "scan {index}");
+        }
+        assert!(after.scans[0].prepare.is_some(), "index 0 was tuned");
+        assert!(after.scans[1].prepare.is_none(), "index 1 was not");
+    }
+
+    /// A scan with no parameters of its own says nothing about them.
+    #[test]
+    fn an_untuned_scan_writes_no_parameters() {
+        let project = Project {
+            scans: vec![Scan {
+                path: PathBuf::from("a.ply"),
+                pose: Se3::identity(),
+                visible: true,
+                role: Role::Idle,
+                prepare: None,
+            }],
+        };
+        let text = project.render(Path::new(""));
+        assert!(!text.contains("voxel"), "{text}");
+        assert!(!text.contains("neighbours"), "{text}");
+    }
+
+    /// A voxel that cannot downsample anything is refused.
+    #[test]
+    fn an_impossible_voxel_is_an_error() {
+        for value in ["0", "-1", "nan"] {
+            let text = format!("{MAGIC} {VERSION}\nscan a.ply\nvoxel {value}\n");
+            assert!(
+                matches!(
+                    Project::parse(&text, Path::new("")),
+                    Err(Error::Line { .. })
+                ),
+                "voxel {value} was accepted"
+            );
+        }
     }
 
     /// A project moved to another machine still finds its scans.
@@ -474,6 +567,7 @@ mod tests {
                 pose: Se3::identity(),
                 visible: true,
                 role: Role::Idle,
+                prepare: None,
             }],
         };
         let base = Path::new("/surveys/hauptgebaude");
@@ -496,6 +590,7 @@ mod tests {
                 pose: Se3::identity(),
                 visible: true,
                 role: Role::Idle,
+                prepare: None,
             }],
         };
         let base = Path::new("/elsewhere");
