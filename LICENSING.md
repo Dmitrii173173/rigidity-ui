@@ -1,7 +1,7 @@
 # Licensing
 
 `rigidity-ui` is dual-licensed on exactly the same terms as
-[`rigidity`](../rigidity/LICENSING.md), and necessarily so: the viewer
+[`rigidity`](https://github.com/Dmitrii173173/rigidity/blob/master/LICENSING.md), and necessarily so: the viewer
 links `rigidity-core`, `rigidity-io`, `rigidity-scenes`,
 `rigidity-pipeline` and `rigidity-spatial` directly, so whatever licence
 covers them covers the application built on top of them.

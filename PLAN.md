@@ -5,9 +5,9 @@ actually resolved: eframe/egui/egui-wgpu 0.36.1, wgpu 30.0.0, nalgebra
 0.35.0. Everything is vendored in the local registry, and
 `cargo build --offline` is green.
 
-Companion documents: [`../rigidity/README.md`](../rigidity/README.md),
-[`../rigidity/PLAN.md`](../rigidity/PLAN.md),
-[`../rigidity/MOTIVATION.md`](../rigidity/MOTIVATION.md).
+Companion documents: [`rigidity/README.md`](https://github.com/Dmitrii173173/rigidity/blob/master/README.md),
+[`rigidity/PLAN.md`](https://github.com/Dmitrii173173/rigidity/blob/master/PLAN.md),
+[`rigidity/MOTIVATION.md`](https://github.com/Dmitrii173173/rigidity/blob/master/MOTIVATION.md).
 
 ## Status
 

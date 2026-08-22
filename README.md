@@ -1,6 +1,6 @@
 # rigidity-ui
 
-**A viewer for [`rigidity`](../rigidity): register two point clouds and see
+**A viewer for [`rigidity`](https://github.com/Dmitrii173173/rigidity): register two point clouds and see
 which degrees of freedom the geometry actually determined.**
 
 The command line prints that answer as six lines of σ values. Six lines is
@@ -94,6 +94,17 @@ own path and requires the command line's output to contain the viewer's
 report byte for byte.
 
 ## Building
+
+The two repositories are cloned side by side. `rigidity` is on crates.io,
+but this crate depends on it by *path*: stage three of the plan develops a
+pose-graph crate upstream and calls it from here in the same sitting, and a
+pinned version would put a publish between every two edits.
+
+```
+git clone https://github.com/Dmitrii173173/rigidity.git
+git clone https://github.com/Dmitrii173173/rigidity-ui.git
+cd rigidity-ui
+```
 
 ```
 cargo test
