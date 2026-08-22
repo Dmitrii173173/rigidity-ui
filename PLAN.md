@@ -40,7 +40,8 @@ without stage 2 has nowhere to put its scans.
 | S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
 | **Upstream** | | |
 | §7 — first four changes | **done** | landed in `../rigidity`; CLI output unchanged |
-| §7 — stage 2 and 3 needs | not started | listed, none of them blocking today |
+| §7 — items 5 and 6 | **done** | Kabsch landed with W4, E57 with W5 |
+| §7 — items 7 and 8 | not started | the pose graph; serde only if S1 asks |
 
 ---
 
@@ -106,9 +107,9 @@ that is only "the same thing, but with a button" stays in the CLI.
 
 ```toml
 [dependencies]
-# Path dependencies — rigidity is unpublished, so a path dependency is the
-# only option today. Switch to a git dependency once the repository has a
-# remote; §10.
+# Path dependencies, and they stay. `rigidity` has a remote and is
+# published — 0.1.1, all eight crates — so a version or git dependency
+# would now resolve; §10 says why neither is taken.
 #
 # Two entries rather than four: §7.2 put the whole file-to-report sequence
 # in `rigidity-pipeline`, which pulls io, spatial and core behind it. The
@@ -492,20 +493,24 @@ one-thread-versus-eight determinism run, rustdoc `-D warnings`) is green.
    call that is the larger half of the wait, and a bar that interpolated
    through it would be a bar that lies.
 
-### What stages 2 and 3 will need — not requested yet
+### What stages 2 and 3 need — 5 and 6 done, 7 and 8 outstanding
 
-Listed now so the boundary stays visible: the viewer contributes screens,
+Listed so the boundary stays visible: the viewer contributes screens,
 `rigidity` contributes mathematics. Anything whose test does not mention a
-pixel belongs upstream.
+pixel belongs upstream. Two of these four were still hypothetical when this
+section was written and were built as stage 2 reached them.
 
-5. **Absolute orientation** (W4). Horn/Kabsch from corresponding point
+5. **Absolute orientation** (W4). ✓ Horn/Kabsch from corresponding point
    pairs: the SVD of a 3×3 correlation matrix, with the reflection case
    handled. It sits beside the Lie-group code in `rigidity-core::lie` and is
    testable against exactly the kind of analytical oracle the rest of that
    crate uses.
-6. **E57** (W5) in `rigidity-io`. The crate is already declared in the
-   workspace and unused; `../rigidity`'s own plan deferred it for want of
-   test data, which is still the honest blocker.
+6. **E57** (W5) in `rigidity-io`. ✓ Landed with the rest of the formats,
+   behind the one dispatcher that chooses a reader by extension. The want
+   of test data that deferred it upstream was answered the way the other
+   formats were: a round-trip test writes the fixture it then reads, twice,
+   once at the origin and once at a UTM coordinate far enough out to catch
+   an f32 that should have been an f64.
 7. **The pose graph** (S2), and this is the substantial one. Nodes, edges,
    Gauss–Newton on SE(3), and edge weights derived from each edge's own
    conditioning rather than from its raw information matrix. It is a
@@ -1062,9 +1067,15 @@ scheduled — the decision happens at S1's gate, against a real point count.
   1.97.1, so the viewer and the CLI are compiled by the same rustc and their
   numbers stay comparable.
 - **Path dependencies make an uncommitted repository a build input.**
-  ~~Resolved.~~ `../rigidity` now has two commits: the state as found, and
-  the §7 changes on top. Moving to a git dependency is still the goal and
-  needs a remote.
+  ~~Resolved.~~ `../rigidity` is committed, has a remote, and is on
+  crates.io as 0.1.1 — and moving to a git or version dependency has
+  stopped being the goal rather than become possible. Stage 3 writes
+  `rigidity-graph` upstream (§7.7) and calls it from here in the same
+  sitting; a pinned dependency would put a publish between every two edits.
+  CI resolves it the other way, checking both repositories out side by side
+  — that is what the `RIGIDITY_REPOSITORY` variable is for. Revisit when the
+  viewer is released, which is the first time an outside builder has to
+  resolve these paths without the sibling directory.
 - **wgpu's API moves between majors.** wgpu 30 renamed
   `push_constant_ranges` to `immediate_size` and made both
   `bind_group_layouts` and `VertexState::buffers` take `Option`s; egui 0.36

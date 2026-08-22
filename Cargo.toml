@@ -16,9 +16,12 @@ license      = "AGPL-3.0-only"
 publish      = false
 
 [dependencies]
-# rigidity is unpublished — no remote, nothing on crates.io — so a path
-# dependency is the only way in. Move to a git dependency as soon as the
-# repository has one; see PLAN.md §10.
+# Path dependencies, deliberately — not for want of an alternative.
+# `rigidity` is published (0.1.1) and has a remote, so a version dependency
+# would resolve; stage 3 develops `rigidity-graph` upstream and calls it
+# from here in the same sitting, and a pinned version would need a publish
+# between every two edits. CI checks the two repositories out side by side
+# instead. See PLAN.md §10.
 rigidity-core     = { path = "../rigidity/crates/rigidity-core" }
 rigidity-io       = { path = "../rigidity/crates/rigidity-io" }
 # Scenes with analytically known null spaces: the built-in demos, and the
