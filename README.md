@@ -161,6 +161,25 @@ On a synthetic loop with one leg down a corridor, this is worth a factor of
 about 120 in the worst scan's drift — the measurement is in `rigidity`'s
 `rigidity-graph`, and it is the reason this project exists.
 
+### Closing the loop
+
+The survey line under the heading counts the closures, and it is the number
+worth reading. A survey walked as a chain — every scan registered against
+the last — has none, and the panel says so in as many words: *nothing is
+checked against anything*. That is not a warning about precision. A chain
+is a tree; no two of its measurements are ever compared, so the solve
+reaches zero residual at whatever answer the chain gives it, and every small
+error made along the way is still in that answer.
+
+Closing it is the same four gestures as any other edge — pick the two scans
+that are next to each other in the room and far apart in the chain, run,
+keep, solve. On a synthetic twelve-station loop that takes the worst
+station from 361 mm out to 22 mm.
+
+If the survey is in more than one piece, the solve says which scans are
+joined to nothing that reaches the anchor, instead of failing to factorise
+and leaving you to work out why.
+
 Twenty scans of a million points is seven times what the viewport can draw
 at 60 fps, so each large scan keeps a coarse copy and the viewport draws
 those while the camera is moving, going back to the full clouds a fifth of

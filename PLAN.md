@@ -36,7 +36,7 @@ without stage 2 has nowhere to put its scans.
 | **Stage 3 — the survey** | | |
 | S1 — Projects | **done** | poses bit-identical, parameters per scan, LOD decided and built |
 | S2 — Pose graph | **done** | `rigidity-graph` upstream, gate 120×; edges, solve, panel, viewport, saved with the project |
-| S3 — Loop closure | not started | manual first, detected later |
+| S3 — Loop closure | **done** | the manual path, and a panel that says when there is no closure |
 | S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
 | **Upstream** | | |
 | §7 — first four changes | **done** | landed in `../rigidity`; CLI output unchanged |

@@ -1434,17 +1434,8 @@ impl eframe::App for App {
         if now - self.camera_moved < SETTLE {
             ui.ctx().request_repaint();
         }
-        // The two survey commands, driven once each, for the harness that
-        // cannot click. Guarded on there being something to link so that it
-        // waits for the registration rather than firing at an empty scene.
         if self.bench.as_ref().is_some_and(Bench::survey) {
-            if self.links.is_empty() {
-                if matches!(self.outcome, Outcome::Registration { .. }) {
-                    self.run_command(Command::Link);
-                }
-            } else if self.solved.is_none() {
-                self.run_command(Command::Solve);
-            }
+            self.walk_the_survey();
         }
         if let Some(bench) = &mut self.bench {
             bench.step(
@@ -2092,6 +2083,52 @@ impl App {
         }
         ui.add_space(space::GROUP);
         heading(ui, palette, "survey");
+
+        // What the edges add up to, before the edges themselves. A survey
+        // walked as a chain reaches zero residual at an answer that is
+        // wrong, because no two of its measurements are ever compared —
+        // and there is nothing on this screen that would otherwise say so.
+        let shape = survey::shape(
+            &self
+                .entries
+                .iter()
+                .map(|entry| (entry.id, entry.pose))
+                .collect::<Vec<_>>(),
+            &self.links,
+            0,
+        );
+        let (tone, summary) = match (shape.adrift, shape.closures) {
+            (0, 0) => (
+                palette.medium,
+                format!(
+                    "{} scan{} in a chain · nothing is checked against anything",
+                    shape.joined,
+                    if shape.joined == 1 { "" } else { "s" }
+                ),
+            ),
+            (0, closures) => (
+                palette.high,
+                format!(
+                    "{} scan{} · {closures} closure{}",
+                    shape.joined,
+                    if shape.joined == 1 { "" } else { "s" },
+                    if closures == 1 { "" } else { "s" }
+                ),
+            ),
+            (adrift, _) => (
+                palette.low,
+                format!(
+                    "{adrift} scan{} joined to nothing that reaches the anchor",
+                    if adrift == 1 { "" } else { "s" }
+                ),
+            ),
+        };
+        ui.horizontal(|ui| {
+            bullet(ui, tone);
+            ui.add_space(space::TIGHT);
+            ui.label(RichText::new(summary).color(palette.muted).size(10.0));
+        });
+        ui.add_space(space::TIGHT);
 
         let mut remove = None;
         for (index, link) in self.links.iter().enumerate() {
@@ -3121,6 +3158,51 @@ impl App {
         self.rebase();
     }
 
+    /// Builds a survey one edge at a time, for the harness that cannot
+    /// click.
+    ///
+    /// Walks the consecutive pairs and then closes the loop, which is the
+    /// sequence a person performs by hand: assign the two roles, wait for
+    /// the registration, keep it, move on. Driven from the frame loop
+    /// because each step has to wait for the worker, and the worker
+    /// answers between frames.
+    ///
+    /// Nothing here is reachable without `RIGIDITY_UI_SURVEY`.
+    fn walk_the_survey(&mut self) {
+        let scans = self.entries.len();
+        if scans < 2 {
+            return;
+        }
+        // A chain for two scans, a closed loop for more: one edge per pair
+        // around the ring.
+        let wanted = if scans == 2 { 1 } else { scans };
+        if self.links.len() >= wanted {
+            if self.solved.is_none() {
+                self.run_command(Command::Solve);
+            }
+            return;
+        }
+        if matches!(self.work, Work::Running { .. }) {
+            return;
+        }
+
+        let step = self.links.len();
+        let (from, to) = (
+            self.entries[step % scans].id,
+            self.entries[(step + 1) % scans].id,
+        );
+        if self.target_id != Some(from) || self.source_id != Some(to) {
+            // `assign` clears the outcome, so the next branch cannot keep a
+            // registration belonging to the pair before this one.
+            self.assign(from, false);
+            self.assign(to, true);
+            return;
+        }
+        if matches!(self.outcome, Outcome::Registration { .. }) {
+            self.run_command(Command::Link);
+        }
+    }
+
     /// Turns a project's edges into survey edges, once its scans are here.
     ///
     /// An edge whose scan failed to load is dropped rather than repaired:
@@ -3207,6 +3289,23 @@ impl App {
             .map(|entry| (entry.id, entry.pose))
             .collect();
         if nodes.is_empty() {
+            return;
+        }
+        // Foreseeable rather than discovered: a piece of the survey that
+        // no chain of edges joins to the anchor makes the normal equations
+        // singular, and "the normal equations are singular" is a worse way
+        // to be told which scans than being told which scans.
+        let shape = survey::shape(&nodes, &self.links, 0);
+        if shape.adrift > 0 {
+            self.solved = Some(format!(
+                "{} scan{} are joined to nothing that reaches {} — \
+                 the survey is in more than one piece",
+                shape.adrift,
+                if shape.adrift == 1 { " is" } else { "s" },
+                self.entries
+                    .first()
+                    .map_or("the anchor", |entry| entry.name()),
+            ));
             return;
         }
         let origin = self.origin();

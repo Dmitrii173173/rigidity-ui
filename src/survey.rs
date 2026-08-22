@@ -25,7 +25,9 @@
 use rigidity_core::lie::Se3;
 use rigidity_core::nalgebra as na;
 use rigidity_core::observability::{Conditioning, ObservabilityCriteria};
-use rigidity_graph::{Edge, GraphError, OptimiseParams, PoseGraph, Report, weighted_information};
+use rigidity_graph::{
+    Edge, GraphError, OptimiseParams, PoseGraph, Report, Shape, weighted_information,
+};
 
 /// A registration kept as an edge of the survey.
 #[derive(Debug, Clone)]
@@ -79,6 +81,31 @@ impl Link {
 /// The shift carrying absolute coordinates into the frame with this origin.
 fn shift(origin: &na::Vector3<f64>) -> Se3 {
     Se3::from_parts(rigidity_core::lie::So3::identity(), -origin)
+}
+
+/// What the edges add up to, for the panel to say out loud.
+///
+/// Built from identity poses: the shape of a graph is a fact about which
+/// nodes its edges name, and none of the arithmetic that needs a frame
+/// happens here.
+pub(crate) fn shape(nodes: &[(u64, Se3)], links: &[Link], anchor: usize) -> Shape {
+    let mut graph = PoseGraph::new(vec![Se3::identity(); nodes.len()]);
+    let index_of = |id: u64| nodes.iter().position(|(other, _)| *other == id);
+    for link in links {
+        let (Some(from), Some(to)) = (index_of(link.from), index_of(link.to)) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        let _ = graph.push(Edge {
+            from,
+            to,
+            measurement: Se3::identity(),
+            information: na::Matrix6::identity(),
+        });
+    }
+    graph.shape(anchor)
 }
 
 /// What one solve did, and to which entries.
