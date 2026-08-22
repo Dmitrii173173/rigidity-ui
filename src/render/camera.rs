@@ -126,6 +126,17 @@ impl Camera {
         self.distance = (self.distance * (-notches * 0.12).exp()).clamp(1e-4, 1e9);
     }
 
+    /// Moves the eye in or out by a ratio rather than by notches.
+    ///
+    /// A trackpad reports a pinch as the proportion the fingers moved
+    /// apart, and passing that straight through is what makes the gesture
+    /// track the fingers: half the pinch, half the change, at every
+    /// distance. The clamp is against a single absurd event, not against
+    /// the gesture.
+    pub(crate) fn pinch(&mut self, ratio: f32) {
+        self.distance = (self.distance / ratio.clamp(0.1, 10.0)).clamp(1e-4, 1e9);
+    }
+
     /// Frames a bounding box.
     ///
     /// The box's bounding *sphere* is fitted, not the box itself: fitting

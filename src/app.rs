@@ -2345,8 +2345,17 @@ impl App {
             self.camera.pan([delta.x, delta.y], rect.height());
         }
         if response.hovered() {
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-            if scroll != 0.0 {
+            // Two gestures arrive at the same place in different units. A
+            // wheel comes as scroll and is counted in notches; a trackpad
+            // pinch comes as a ratio, and on a Mac it is *the* gesture for
+            // this — left unhandled, the obvious way to zoom does nothing
+            // at all, which reads as the application ignoring the trackpad.
+            let (scroll, pinch) =
+                ui.input(|input| (input.smooth_scroll_delta.y, input.zoom_delta()));
+            if pinch != 1.0 {
+                self.camera.pinch(pinch);
+                ui.ctx().request_repaint();
+            } else if scroll != 0.0 {
                 self.camera.dolly(scroll * 0.05);
                 ui.ctx().request_repaint();
             }
