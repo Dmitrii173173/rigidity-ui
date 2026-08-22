@@ -283,6 +283,11 @@ pub(crate) struct App {
     links: Vec<Link>,
     /// What the last solve said, for the strip.
     solved: Option<String>,
+    /// The survey seen whole, from the last solve.
+    ///
+    /// Cleared whenever an edge or a pose changes, because it describes a
+    /// solve and a stale one would describe a survey that no longer exists.
+    diagnosis: Option<rigidity_graph::Diagnosis>,
     /// Edges read from a project, waiting for the scans they name.
     ///
     /// Positions in the file, not identifiers: the clouds do not exist yet
@@ -432,6 +437,7 @@ impl App {
             opening,
             links: Vec::new(),
             solved: None,
+            diagnosis: None,
             pending_edges: Vec::new(),
             opening_order: Vec::new(),
             work: Work::Idle,
@@ -1329,6 +1335,7 @@ impl App {
             Command::Unlink => {
                 self.links.clear();
                 self.solved = None;
+                self.diagnosis = None;
             }
             Command::Solve => self.solve(),
             Command::SaveProject => self.save_project(),
@@ -1348,6 +1355,7 @@ impl App {
                 self.opening.clear();
                 self.links.clear();
                 self.solved = None;
+                self.diagnosis = None;
                 self.pending_edges.clear();
                 self.opening_order.clear();
             }
@@ -2164,16 +2172,82 @@ impl App {
                     }
                 });
             });
+            // Two numbers rather than one, and the pair is the diagnosis.
+            // An edge left half a metre apart that is pulling at nothing is
+            // an edge whose weight along that direction was removed: it
+            // could not see along there, the survey settled another way, and
+            // nothing is wrong. Half a millimetre apart while pulling hard
+            // is a measurement losing an argument it should be winning.
+            let settled = match self.diagnosis.as_ref().and_then(|d| d.edges.get(index)) {
+                Some(report) => format!(
+                    " · left {} m apart, pulling {}",
+                    metres(report.translation),
+                    metres(report.cost)
+                ),
+                None => String::new(),
+            };
             ui.label(
-                RichText::new(format!("{note} determined · rmse {}", metres(link.rmse)))
-                    .color(palette.muted)
-                    .size(10.0),
+                RichText::new(format!(
+                    "{note} determined · rmse {} m{settled}",
+                    metres(link.rmse)
+                ))
+                .color(palette.muted)
+                .size(10.0),
             );
             ui.add_space(space::TIGHT);
         }
         if let Some(index) = remove {
             self.links.remove(index);
             self.solved = None;
+            self.diagnosis = None;
+        }
+
+        // How well the survey knows where each station is, worst first.
+        // The spectrum's question asked one level up: not what a single
+        // registration determined, but what the survey as a whole did.
+        if let Some(diagnosis) = &self.diagnosis {
+            let mut stations: Vec<_> = diagnosis
+                .nodes
+                .iter()
+                .filter_map(|report| {
+                    let entry = self.entries.get(report.node)?;
+                    Some((
+                        entry.name().to_owned(),
+                        report.position().0,
+                        report.orientation(),
+                    ))
+                })
+                .collect();
+            stations.sort_by(|a, b| b.1.total_cmp(&a.1));
+            if !stations.is_empty() {
+                ui.add_space(space::TIGHT);
+                ui.label(
+                    RichText::new("least certain stations")
+                        .color(palette.faint)
+                        .size(10.0),
+                );
+                // Three, not all of them: a survey of forty would otherwise
+                // put thirty-seven rows nobody reads under the three that
+                // matter, and the ordering is the answer.
+                for (name, spread, turn) in stations.iter().take(3) {
+                    let (colour, reading) = if spread.is_finite() {
+                        (
+                            palette.muted,
+                            format!("±{} m · ±{}°", metres(*spread), metres(turn.to_degrees())),
+                        )
+                    } else {
+                        (
+                            palette.low,
+                            "nothing in the survey determines it".to_owned(),
+                        )
+                    };
+                    ui.label(
+                        RichText::new(format!("{name} · {reading}"))
+                            .color(colour)
+                            .size(10.0),
+                    );
+                }
+            }
         }
 
         if let Some(note) = &self.solved {
@@ -3273,6 +3347,7 @@ impl App {
             .retain(|old| !(old.from == from && old.to == to || old.from == to && old.to == from));
         self.links.push(link);
         self.solved = None;
+        self.diagnosis = None;
     }
 
     /// Solves the survey and moves every scan to where the edges put it.
@@ -3322,6 +3397,7 @@ impl App {
         };
         match result {
             Ok(solved) => {
+                self.diagnosis = solved.diagnosis.clone();
                 let mut moved: f64 = 0.0;
                 for (entry, pose) in self.entries.iter_mut().zip(&solved.poses) {
                     moved = moved.max((entry.pose.translation() - pose.translation()).norm());

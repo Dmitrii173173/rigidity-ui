@@ -180,6 +180,31 @@ If the survey is in more than one piece, the solve says which scans are
 joined to nothing that reaches the anchor, instead of failing to factorise
 and leaving you to work out why.
 
+### After the solve
+
+Each edge gains two numbers: how far apart the solve left its ends, and how
+hard it is pulling. The pair is the diagnosis and neither half is it alone.
+An edge left half a metre apart that pulls at almost nothing is an edge
+whose weight along that direction was removed — it could not see along
+there, the survey settled by another path, and nothing is wrong. Half a
+millimetre apart while pulling hard is a measurement losing an argument it
+should be winning, and that is the one to go back and do again.
+
+Under them, the **least certain stations**: how well the survey as a whole
+knows where each scan is, worst first, in metres and degrees. That is the
+spectrum's question one level up — not what a single registration
+determined, but what all of them together did. A station nothing joins to
+the anchor says so in words rather than being given a plausible number.
+
+One measurement decided how this is computed, and it is worth knowing about
+if you ever move it. A survey four million metres from zero has to be
+conjugated onto itself before the solve: not because the poses are large —
+every quantity the solve touches is a relative one, good to a nanometre —
+but because `weighted_information` refers its directions to the coordinate
+origin, where a milliradian of rotation carries four kilometres of
+translation. The matrix conditions at 1e18 there against 1e2 at the survey,
+and solving without moving it puts the answer 58 m out on a 20 m loop.
+
 Twenty scans of a million points is seven times what the viewport can draw
 at 60 fps, so each large scan keeps a coarse copy and the viewport draws
 those while the camera is moving, going back to the full clouds a fifth of

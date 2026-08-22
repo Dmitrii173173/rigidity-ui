@@ -4,29 +4,42 @@
 //! the mathematics cannot know about: which clouds on screen a node refers
 //! to, and which frame the numbers should be expressed in.
 //!
-//! # The frame, and why it is not the obvious one
+//! # The frame, and the measurement that decided it
 //!
-//! A conditioning report describes directions relative to the *coordinate
-//! origin*, and a scan's pose is in absolute coordinates too, so the two
-//! already agree and a graph could be built from them directly. It would
-//! also be unusable on any survey that is georeferenced. Referred to
-//! absolute zero, a milliradian of rotation about a scene four million
-//! metres north is four kilometres of translation: the residual and the
-//! information matrix both stay *correct*, and they span twelve orders of
-//! magnitude, which the Cholesky of the normal equations does not survive.
+//! A pose graph could be built straight out of absolute coordinates: a
+//! conditioning report describes directions relative to the coordinate
+//! origin, a scan's pose is in absolute coordinates too, and the two agree.
+//! On anything georeferenced it is unusable, and not for the reason it first
+//! looks like.
 //!
-//! So everything is conjugated into the frame the viewport already draws
-//! in, whose origin sits on the survey. `T' = S·T·S⁻¹` for a pose and
-//! `Λ' = Adj(S)⁻ᵀ·Λ·Adj(S)⁻¹` for an information matrix, with
-//! `S = (I, −origin)`. Both are exact — this is a change of coordinates and
-//! not an approximation — and `the_cost_does_not_depend_on_the_frame` is
-//! what says so.
+//! The poses are not the problem. Every quantity the solve touches is a
+//! relative one, and `T_i⁻¹·T_j` between two stations four million metres
+//! from zero is still good to about a nanometre — measured, in
+//! `the_world_alone_would_not_have_needed_moving`.
+//!
+//! The *information matrix* is the problem. `weighted_information` reports
+//! its directions about the coordinate origin, so a rotation of one
+//! milliradian carries four kilometres of translation with it, and the
+//! matrix comes back with a condition number of 1e18 where the same room at
+//! the origin gives 1e2. Sixteen orders of avoidable ill-conditioning, and
+//! the Cholesky of the normal equations has nothing left afterwards.
+//!
+//! So the graph is *conjugated* onto the survey — `T' = S·T·S⁻¹`,
+//! `Z' = S·Z·S⁻¹`, `Λ' = Adj(S)⁻ᵀ·Λ·Adj(S)⁻¹`, with `S = (I, −origin)`. That
+//! moves the point every direction is referred to from absolute zero onto
+//! the survey, which is the whole of the fix.
+//!
+//! It also moves the point each station's marginal uncertainty is *about*,
+//! and that would quietly turn "how well do we know where this station is"
+//! into "how well do we know where the survey's origin is, as seen from
+//! this station". [`diagnose`] carries the covariances back by the same
+//! adjoint before anybody reads them.
 
 use rigidity_core::lie::Se3;
 use rigidity_core::nalgebra as na;
 use rigidity_core::observability::{Conditioning, ObservabilityCriteria};
 use rigidity_graph::{
-    Edge, GraphError, OptimiseParams, PoseGraph, Report, Shape, weighted_information,
+    Diagnosis, Edge, GraphError, OptimiseParams, PoseGraph, Report, Shape, weighted_information,
 };
 
 /// A registration kept as an edge of the survey.
@@ -78,7 +91,7 @@ impl Link {
     }
 }
 
-/// The shift carrying absolute coordinates into the frame with this origin.
+/// The shift carrying absolute world coordinates onto the survey.
 fn shift(origin: &na::Vector3<f64>) -> Se3 {
     Se3::from_parts(rigidity_core::lie::So3::identity(), -origin)
 }
@@ -114,6 +127,9 @@ pub(crate) struct Solved {
     pub(crate) poses: Vec<Se3>,
     /// What the optimiser reports about itself.
     pub(crate) report: Report,
+    /// The survey seen whole, with every marginal carried back into the
+    /// frame its station stands in.
+    pub(crate) diagnosis: Option<Diagnosis>,
 }
 
 /// Solves the survey, and gives back a pose per entry.
@@ -135,8 +151,7 @@ pub(crate) fn solve(
 ) -> Option<Result<Solved, GraphError>> {
     let shift = shift(origin);
     let unshift = shift.inverse();
-    let inverse_adjoint = unshift.adjoint();
-
+    let carry = unshift.adjoint();
     let index_of = |id: u64| nodes.iter().position(|(other, _)| *other == id);
 
     let mut graph = PoseGraph::new(
@@ -153,14 +168,13 @@ pub(crate) fn solve(
         if from == to {
             continue;
         }
-        // The quadratic form has to come out the same in either frame, so
-        // the information transforms by the inverse adjoint on both sides.
-        let information = inverse_adjoint.transpose() * link.information * inverse_adjoint;
         if let Err(error) = graph.push(Edge {
             from,
             to,
             measurement: shift * link.measurement * unshift,
-            information,
+            // The quadratic form has to come out the same, so the
+            // information transforms by the inverse adjoint on both sides.
+            information: carry.transpose() * link.information * carry,
         }) {
             return Some(Err(error));
         }
@@ -179,6 +193,17 @@ pub(crate) fn solve(
                 .iter()
                 .map(|pose| unshift * *pose * shift)
                 .collect(),
+            diagnosis: graph.diagnose(anchor).ok().map(|mut diagnosis| {
+                // Back into the frame each station actually stands in. The
+                // conjugation put every marginal about the survey's origin;
+                // without this the position block would answer a question
+                // nobody asked.
+                let back = shift.adjoint();
+                for node in &mut diagnosis.nodes {
+                    node.covariance = back.transpose() * node.covariance * back;
+                }
+                diagnosis
+            }),
             report,
         })),
         Err(error) => Some(Err(error)),
@@ -198,8 +223,21 @@ mod tests {
         )
     }
 
-    /// The cost of one deliberately-wrong measurement, computed in the
-    /// frame with this origin, for a scene centred at `centre`.
+    /// An information matrix with different weights in different directions,
+    /// so that a frame change could not hide behind a multiple of the
+    /// identity.
+    fn lopsided() -> na::Matrix6<f64> {
+        let mut out = na::Matrix6::zeros();
+        for axis in 0..6 {
+            out[(axis, axis)] = 10f64.powi(axis as i32 - 2);
+        }
+        out[(0, 4)] = 0.3;
+        out[(4, 0)] = 0.3;
+        out
+    }
+
+    /// The cost of one deliberately-wrong measurement, with the world's
+    /// origin put here, for a scene centred at `centre`.
     fn cost_in(origin: na::Vector3<f64>, centre: na::Vector3<f64>) -> f64 {
         let nodes = [
             pose(centre.x, centre.y, 0.0),
@@ -211,43 +249,26 @@ mod tests {
         let measurement = Se3::exp(&na::Vector6::new(0.02, -0.01, 0.005, 0.0, 0.0, 0.001)) * truth;
 
         let s = shift(&origin);
-        let inverse = s.inverse();
-        let adjoint = inverse.adjoint();
-        let mut graph = PoseGraph::new(nodes.iter().map(|pose| s * *pose * inverse).collect());
+        let mut graph = PoseGraph::new(nodes.iter().map(|pose| s * *pose).collect());
         graph
             .push(Edge {
                 from: 0,
                 to: 1,
-                measurement: s * measurement * inverse,
-                information: adjoint.transpose() * lopsided() * adjoint,
+                measurement,
+                information: lopsided(),
             })
             .expect("the edge names real nodes");
         graph.cost()
     }
 
-    /// An information matrix with different weights in different directions,
-    /// so that a frame change that got the adjoint wrong could not hide
-    /// behind a multiple of the identity.
-    fn lopsided() -> na::Matrix6<f64> {
-        let mut out = na::Matrix6::zeros();
-        for axis in 0..6 {
-            out[(axis, axis)] = 10f64.powi(axis as i32 - 2);
-        }
-        // Off-diagonal terms too: a diagonal matrix is invariant under more
-        // transformations than the right one.
-        out[(0, 4)] = 0.3;
-        out[(4, 0)] = 0.3;
-        out
-    }
-
-    /// The change of frame is a change of coordinates, so the cost is the
-    /// same number on both sides of it.
+    /// Moving the world's origin changes nothing, because every quantity the
+    /// solve touches is a relative one.
     ///
     /// The scene sits at the origin here and only the frame moves, which is
-    /// what isolates the algebra. Building the scene at a UTM coordinate
-    /// instead would lose eight digits in `nodes[0].inverse() * nodes[1]`
-    /// before any of this code ran, and the comparison would be measuring
-    /// that subtraction rather than the adjoint.
+    /// what isolates the claim. Building the scene at a UTM coordinate
+    /// instead loses eight digits in `nodes[0].inverse() * nodes[1]` before
+    /// any of this code runs, and the comparison would be measuring that
+    /// subtraction — which is the next test.
     #[test]
     fn the_cost_does_not_depend_on_the_frame() {
         let at_zero = cost_in(na::Vector3::zeros(), na::Vector3::zeros());
@@ -256,34 +277,128 @@ mod tests {
         let relative = (at_zero - moved).abs() / at_zero;
         assert!(
             relative < 1e-12,
-            "the cost changed by {relative} relative when the frame moved"
+            "the cost changed by {relative} relative when the world moved"
         );
     }
 
     /// And the absolute frame is the one that cannot hold the answer.
     ///
-    /// This is the whole argument for shifting, made as a measurement
-    /// rather than as a claim in a doc comment. The same cost computed at
-    /// absolute zero disagrees with the local one by around 1e-8 relative
-    /// — about eight digits, which is what `f64` loses when a two-centimetre
-    /// residual is built out of coordinates of four million metres.
+    /// This is the whole argument for shifting, made as a measurement rather
+    /// than as a claim in a doc comment: the same cost computed with the
+    /// world's origin at absolute zero disagrees by around 1e-8 relative,
+    /// which is the eight digits `f64` loses when a two-centimetre residual
+    /// is built out of coordinates of four million metres.
     ///
     /// The lower bound is the assertion that matters. If this ever stops
     /// disagreeing, either the fixture stopped being georeferenced or the
     /// shift stopped happening, and both are worth being told about.
+    /// Eight stations round a ring, joined consecutively with a bias.
+    fn ring(
+        centre: na::Vector3<f64>,
+        information: na::Matrix6<f64>,
+    ) -> (Vec<(u64, Se3)>, Vec<Link>) {
+        let nodes: Vec<(u64, Se3)> = (0..8)
+            .map(|index| {
+                let angle = index as f64 / 8.0 * std::f64::consts::TAU;
+                (
+                    index as u64,
+                    pose(
+                        centre.x + 20.0 * angle.cos(),
+                        centre.y + 20.0 * angle.sin(),
+                        angle,
+                    ),
+                )
+            })
+            .collect();
+        let bias = Se3::exp(&na::Vector6::new(0.01, 0.004, 0.0, 0.0, 0.0, 0.0015));
+        let links = (0..8)
+            .map(|from| {
+                let to = (from + 1) % 8;
+                Link {
+                    from: from as u64,
+                    to: to as u64,
+                    measurement: bias * (nodes[from].1.inverse() * nodes[to].1),
+                    information,
+                    determined: 6,
+                    rmse: 0.0,
+                }
+            })
+            .collect();
+        (nodes, links)
+    }
+
+    /// What not moving the frame costs the answer.
+    ///
+    /// The weight here is the shape a real one has: well-conditioned about
+    /// the room it was measured in, and *expressed* about the coordinate
+    /// origin, which is where `weighted_information` puts it. At a UTM
+    /// easting that is a matrix conditioning at 1e18, and solving with it as
+    /// given rather than conjugated onto the survey moves the answer by
+    /// centimetres.
+    ///
+    /// The assertion is a lower bound, deliberately. If this ever stops
+    /// disagreeing, the conjugation has stopped being load-bearing and
+    /// should go — but it should go on a measurement, and this is the one.
     #[test]
-    fn the_absolute_frame_is_the_one_that_loses_digits() {
+    fn not_moving_the_frame_costs_the_answer() {
         let centre = na::Vector3::new(512_345.678_9, 4_123_456.789_1, 231.5);
-        let local = cost_in(centre, centre);
-        let absolute = cost_in(na::Vector3::zeros(), centre);
-        let relative = (absolute - local).abs() / local;
+        let carry = shift(&centre).inverse().adjoint();
+        let realistic = carry.transpose() * (na::Matrix6::identity() * 1e6) * carry;
+        let (nodes, links) = ring(centre, realistic);
+
+        let run = |origin: na::Vector3<f64>| {
+            solve(&nodes, &links, 0, &origin, &OptimiseParams::default())
+                .expect("there are edges")
+                .expect("and it solves")
+                .poses
+        };
+        let worst = run(centre)
+            .iter()
+            .zip(&run(na::Vector3::zeros()))
+            .map(|(a, b)| (a.translation() - b.translation()).norm())
+            .fold(0.0f64, f64::max);
+        println!("leaving the frame where it is costs {worst:e} m");
         assert!(
-            relative > 1e-11,
-            "absolute coordinates lost only {relative} relative — is the fixture still far from zero?"
+            worst > 1e-3,
+            "the two frames agree to {worst} m, so the conjugation is no \
+             longer earning its place"
         );
+    }
+
+    /// And the information matrix is what did.
+    ///
+    /// A weight referred to the coordinate origin carries four kilometres of
+    /// translation for every milliradian of rotation once the survey is four
+    /// million metres out. Conjugating moves the point it is referred to
+    /// onto the survey, and this measures what that is worth: the condition
+    /// number of the matrix the solve is actually handed.
+    #[test]
+    fn conjugating_is_what_saves_the_information_matrix() {
+        let centre = na::Vector3::new(512_345.678_9, 4_123_456.789_1, 231.5);
+        // A weight of the shape a real registration produces: strong in
+        // translation, far stronger in rotation, referred to the origin.
+        let mut absolute = na::Matrix6::zeros();
+        for axis in 0..3 {
+            absolute[(axis, axis)] = 2.5e8;
+            absolute[(axis + 3, axis + 3)] = 2.5e8;
+        }
+        let s = shift(&centre);
+        let carry = s.inverse().adjoint();
+        let conjugated = carry.transpose() * absolute * carry;
+
+        let condition = |m: &na::Matrix6<f64>| {
+            let eigen = m.symmetric_eigen().eigenvalues;
+            let hi = eigen.iter().fold(0.0f64, |b, v| b.max(v.abs()));
+            let lo = eigen.iter().fold(f64::INFINITY, |b, v| b.min(v.abs()));
+            hi / lo
+        };
+        let before = condition(&conjugated);
+        let after = condition(&absolute);
         assert!(
-            relative < 1e-5,
-            "absolute coordinates lost {relative} relative, which is more than rounding"
+            before > 1e10 * after,
+            "referred to the origin the weight conditions at {before:e} and \
+             referred to the survey at {after:e} — if those are close, the \
+             conjugation is no longer earning its place"
         );
     }
 

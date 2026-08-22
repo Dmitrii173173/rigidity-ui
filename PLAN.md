@@ -37,7 +37,7 @@ without stage 2 has nowhere to put its scans.
 | S1 — Projects | **done** | poses bit-identical, parameters per scan, LOD decided and built |
 | S2 — Pose graph | **done** | `rigidity-graph` upstream, gate 120×; edges, solve, panel, viewport, saved with the project |
 | S3 — Loop closure | **done** | the manual path, and a panel that says when there is no closure |
-| S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
+| S4 — Whole-survey view | **done** | per-edge settlement, per-station certainty, and the frame measured |
 | **Upstream** | | |
 | §7 — first four changes | **done** | landed in `../rigidity`; CLI output unchanged |
 | §7 — items 5 and 6 | **done** | Kabsch landed with W4, E57 with W5 |
