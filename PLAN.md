@@ -1062,11 +1062,19 @@ real ETH scans go from 27 fps to 120. A cloud carrying a scalar field is
 never swapped for its preview, because the values are one per point of the
 full cloud.
 
+135 000 is a cap and not a target, and the difference matters when reading
+the number above. The voxel is guessed from the bounding box and then
+corrected only downwards, so a preview usually lands well under: the
+corridor demo keeps 50 271 points of 180 000, 28%. That is why twenty
+million came back at 120 fps rather than at the 60 the cap alone predicts,
+and it is why the unblock condition below is a measurement rather than a
+scan count.
+
 *Unblocks an octree:* a survey whose **previews alone** exceed the budget,
-where coarsening them further stops showing the scene. At 135 000 a scan
-that is about forty scans — which is stage three's own stated target, so
-this is near rather than hypothetical. The voxel is a knob before it is a
-rewrite: 68 000 a scan holds forty.
+where lowering the cap further stops showing the scene. The cap is a knob
+long before it is a rewrite, and the guess currently leaves most of the
+knob unturned — so this is further off than forty scans, but it is on the
+way there rather than hypothetical.
 *Unblocks out-of-core:* full clouds that no longer fit in memory.
 
 **S2 — Pose graph.** Gauss–Newton on SE(3) over the graph, with each edge's

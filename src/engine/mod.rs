@@ -540,6 +540,60 @@ fn bounds_of(cloud: &PointCloud) -> Option<([f64; 3], [f64; 3])> {
 mod tests {
     use super::*;
 
+    /// A big cloud gets a preview, and the preview is under the cap.
+    ///
+    /// The failure this guards against is silent in the worst way: every
+    /// path in `coarse` that gives up returns `None`, which is also what a
+    /// cloud small enough to need no preview returns. A downsampler that
+    /// quietly stopped working would leave the viewport drawing full
+    /// clouds at eight frames a second and nothing anywhere saying why.
+    #[test]
+    fn a_large_cloud_gets_a_preview_within_the_cap() {
+        let (_, cloud) = demo_pair(Demo::Corridor)
+            .into_iter()
+            .next()
+            .expect("the corridor demo makes clouds");
+        assert!(
+            cloud.len() > PREVIEW_POINTS,
+            "the demo is too small to exercise this: {} points",
+            cloud.len()
+        );
+
+        let preview = coarse(&cloud).expect("a cloud this size should get a preview");
+        assert!(
+            preview.len() <= PREVIEW_POINTS,
+            "the preview kept {} points, over the {PREVIEW_POINTS} cap",
+            preview.len()
+        );
+        // Not empty either: a voxel doubled four times could in principle
+        // swallow a small scene whole, and an empty preview draws nothing
+        // while reporting an excellent frame time.
+        assert!(
+            preview.len() > PREVIEW_POINTS / 20,
+            "the preview kept only {} of {} points — it is not a preview, \
+             it is a deletion",
+            preview.len(),
+            cloud.len()
+        );
+        println!(
+            "preview: {} points from {} ({:.1}%)",
+            preview.len(),
+            cloud.len(),
+            100.0 * preview.len() as f64 / cloud.len() as f64
+        );
+    }
+
+    /// And a small one is left alone rather than copied for nothing.
+    #[test]
+    fn a_small_cloud_is_its_own_preview() {
+        let mut cloud = PointCloud::new();
+        for index in 0..1_000 {
+            let angle = index as f64 * 0.01;
+            cloud.push(na::Vector3::new(angle.cos(), angle.sin(), angle));
+        }
+        assert!(coarse(&cloud).is_none());
+    }
+
     /// Every demo produces two clouds a registration can actually be run
     /// on, displaced by the amount the copied command line claims.
     ///
