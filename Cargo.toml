@@ -34,6 +34,10 @@ rigidity-pipeline = { path = "../rigidity/crates/rigidity-pipeline" }
 # about every point of both clouds, not about the downsampled surfaces the
 # pipeline prepares for the solver.
 rigidity-spatial  = { path = "../rigidity/crates/rigidity-spatial" }
+# The survey: nodes, edges, and Gauss-Newton over them. The weighting that
+# makes it worth having is upstream too — this crate contributes the screen
+# and nothing whose test would mention a matrix.
+rigidity-graph    = { path = "../rigidity/crates/rigidity-graph" }
 
 # One dependency for the whole UI and GPU stack: eframe re-exports the
 # `egui`, `egui_wgpu` and `wgpu` it was built against, so those three can

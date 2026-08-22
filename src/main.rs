@@ -9,14 +9,36 @@ mod histogram;
 mod project;
 mod render;
 mod spectrum;
+mod survey;
 mod theme;
 mod timeline;
 
 use std::path::PathBuf;
 
+/// The window size, or an override for the measurement harness.
+///
+/// `RIGIDITY_UI_SIZE=1280x1400`. The inspector is a scroll area and its
+/// lower sections do not fit an ordinary window, so a screenshot of the
+/// application cannot show them — and a screenshot is how the milestones
+/// that are about what the image shows are checked. Reading an environment
+/// variable is a smaller thing than shipping a panel nobody has seen.
+fn window_size() -> [f32; 2] {
+    let default = [1280.0, 800.0];
+    let Ok(text) = std::env::var("RIGIDITY_UI_SIZE") else {
+        return default;
+    };
+    let Some((width, height)) = text.split_once(['x', 'X']) else {
+        return default;
+    };
+    match (width.trim().parse(), height.trim().parse()) {
+        (Ok(width), Ok(height)) => [width, height],
+        _ => default,
+    }
+}
+
 fn main() -> eframe::Result {
     let viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([1280.0, 800.0])
+        .with_inner_size(window_size())
         .with_min_inner_size([880.0, 560.0]);
     // The content runs to the top of the window and the traffic lights
     // float over it, which is what a macOS application built in the last

@@ -64,6 +64,14 @@ pub(crate) enum Command {
     SaveProject,
     /// Read one back.
     OpenProject,
+    /// Keep this registration as an edge of the survey, weighted by what
+    /// its own conditioning says it determined.
+    Link,
+    /// Throw the survey's edges away.
+    Unlink,
+    /// Solve the survey: move every scan so the edges agree as well as
+    /// their weights say they can.
+    Solve,
 }
 
 impl Command {
@@ -90,6 +98,9 @@ impl Command {
             Self::Place => "place the source where the registration put it".to_owned(),
             Self::SaveProject => "save the project…".to_owned(),
             Self::OpenProject => "open a project…".to_owned(),
+            Self::Link => "keep this registration as a survey edge".to_owned(),
+            Self::Unlink => "forget the survey edges".to_owned(),
+            Self::Solve => "solve the survey".to_owned(),
         }
     }
 
@@ -102,6 +113,7 @@ impl Command {
             Self::Fit => "F",
             Self::Measure => "M",
             Self::SaveProject => "⌘S",
+            Self::Solve => "⌘G",
             _ => "",
         }
     }

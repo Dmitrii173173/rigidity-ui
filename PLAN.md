@@ -35,13 +35,14 @@ without stage 2 has nowhere to put its scans.
 | W5 — Formats | **done** | LAS/LAZ, E57, PCD, export; one door for all of them |
 | **Stage 3 — the survey** | | |
 | S1 — Projects | **done** | poses bit-identical, parameters per scan, LOD decided and built |
-| S2 — Pose graph | not started | degeneracy-weighted edges — the actual contribution |
+| S2 — Pose graph | **done** | `rigidity-graph` upstream, gate 120×; edges, solve, panel, viewport, saved with the project |
 | S3 — Loop closure | not started | manual first, detected later |
 | S4 — Whole-survey view | not started | drift, residuals per edge, per-scan conditioning |
 | **Upstream** | | |
 | §7 — first four changes | **done** | landed in `../rigidity`; CLI output unchanged |
 | §7 — items 5 and 6 | **done** | Kabsch landed with W4, E57 with W5 |
-| §7 — items 7 and 8 | not started | the pose graph; serde only if S1 asks |
+| §7 — item 7 | **done** | `rigidity-graph`, and an `SE(3)` Jacobian in the core |
+| §7 — item 8 | not needed yet | serde; S1 shipped without it and the format is the better for it |
 
 ---
 
@@ -511,17 +512,27 @@ section was written and were built as stage 2 reached them.
    formats were: a round-trip test writes the fixture it then reads, twice,
    once at the origin and once at a UTM coordinate far enough out to catch
    an f32 that should have been an f64.
-7. **The pose graph** (S2), and this is the substantial one. Nodes, edges,
-   Gauss–Newton on SE(3), and edge weights derived from each edge's own
-   conditioning rather than from its raw information matrix. It is a
-   `rigidity` feature that happens to have a viewer, not the other way
-   round: it needs the determinism guarantee, the property tests and the
-   synthetic oracles that live upstream. A `rigidity-graph` crate beside
-   `rigidity-core` is the natural home.
-8. **Optionally `serde` behind a feature** (S1), if project files ever need
-   to hold more than paths and poses. Until then the viewer writes its own
-   text and the core stays serde-free, which is worth more than the
-   convenience.
+7. **The pose graph** (S2). ✓ `rigidity-graph`, beside `rigidity-core` as
+   this section guessed, and the guess about where the difficulty would be
+   was wrong in an instructive direction. The optimiser was the easy half.
+   The hard halves were a Jacobian the core did not have — `SE(3)`'s, whose
+   `Q` block needed two series coefficients with a threshold fifty times the
+   module's usual — and a gate that at first proved nothing, because a
+   perfectly degenerate synthetic corridor makes `JᵀWJ` exactly singular and
+   the naive weighting free. The corridor in the gate now has a far end, two
+   points wide, which is what a real one has.
+
+   Worst-station drift over a loop with one slipped corridor leg: 7.32 mm
+   naive, 0.061 mm weighted. The calibration is deliberately not in the
+   crate — it arrives through `criteria.noise_sigma`, which is where this
+   viewer's ×17 slider already puts it, so the screen and the graph cannot
+   disagree.
+8. **Optionally `serde` behind a feature** (S1). Not needed. S1 shipped
+   holding paths, poses, roles, visibility and two preparation numbers, all
+   of it written by hand in twenty lines, and the format is better for it:
+   the pose is twelve numbers because bit-identity demanded a matrix rather
+   than a twist, and a derive would have picked whatever `Se3`'s fields
+   happened to be. The core stays serde-free.
 
 ---
 

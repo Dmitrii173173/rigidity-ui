@@ -38,6 +38,13 @@ pub(crate) struct Bench {
     phase: Option<f64>,
     /// Whether to open the command list, so that it can be looked at.
     commands: bool,
+    /// Whether to build a one-edge survey and solve it.
+    ///
+    /// Two commands that cannot be reached from a shell, and a screen that
+    /// exists to show what they did. The alternative was to ship the survey
+    /// panel having only ever seen it compile, which is the limit that let
+    /// three M5 features ship missing.
+    survey: bool,
     /// A scalar field to colour the first cloud by, named as the picker
     /// names it.
     field: Option<String>,
@@ -62,6 +69,7 @@ impl Bench {
                 .ok()
                 .and_then(|value| value.parse().ok()),
             commands: std::env::var("RIGIDITY_UI_COMMANDS").is_ok(),
+            survey: std::env::var("RIGIDITY_UI_SURVEY").is_ok(),
             field: std::env::var("RIGIDITY_UI_FIELD").ok(),
             uploads: None,
             seconds,
@@ -75,6 +83,11 @@ impl Bench {
     /// Whether the command list should be showing.
     pub(crate) fn commands(&self) -> bool {
         self.commands
+    }
+
+    /// Whether to keep the registration as an edge and solve the survey.
+    pub(crate) fn survey(&self) -> bool {
+        self.survey
     }
 
     /// The field to colour by, taken once.

@@ -29,6 +29,8 @@ use crate::field::{self, Field, Source};
 use crate::project::{self, Project};
 use crate::render::camera::Camera;
 use crate::render::{self, CloudDraw, ViewportCallback};
+use crate::spectrum::metres;
+use crate::survey::{self, Link};
 use crate::theme::{self, Mode, Palette, space};
 use crate::{histogram, spectrum, timeline};
 
@@ -272,6 +274,27 @@ pub(crate) struct App {
     source_id: Option<u64>,
     reading: Option<PathBuf>,
     failure: Option<Failure>,
+    /// The survey's edges: registrations kept, with the weight each one's
+    /// conditioning justifies.
+    ///
+    /// A registration lives until the next run replaces it. An edge is what
+    /// it becomes when somebody decides to keep it, and a survey is the set
+    /// of those decisions.
+    links: Vec<Link>,
+    /// What the last solve said, for the strip.
+    solved: Option<String>,
+    /// Edges read from a project, waiting for the scans they name.
+    ///
+    /// Positions in the file, not identifiers: the clouds do not exist yet
+    /// when the file is parsed, and inventing identifiers for them here
+    /// would mean two places that decide what a scan is called.
+    pending_edges: Vec<project::EdgeRecord>,
+    /// The files a project named, in its own order.
+    ///
+    /// Kept beside `opening`, which is drained as clouds arrive: an edge
+    /// names position three, and position three is a fact about the file
+    /// rather than about what has loaded so far.
+    opening_order: Vec<PathBuf>,
     /// Scans whose files have been asked for but have not arrived.
     ///
     /// Opening a project is N reads through the same worker as everything
@@ -407,6 +430,10 @@ impl App {
             reading: None,
             failure,
             opening,
+            links: Vec::new(),
+            solved: None,
+            pending_edges: Vec::new(),
+            opening_order: Vec::new(),
             work: Work::Idle,
             measuring: None,
             outcome: Outcome::Nothing,
@@ -786,6 +813,7 @@ impl App {
                     // not one per scan: twenty reports would be superseded
                     // nineteen times, and the nineteen are not free.
                     if self.opening.is_empty() {
+                        self.adopt_edges();
                         self.request();
                     }
                 }
@@ -1095,6 +1123,8 @@ impl App {
                     input.key_pressed(Key::M),
                     input.modifiers.matches_logically(Modifiers::COMMAND)
                         && input.key_pressed(Key::S),
+                    input.modifiers.matches_logically(Modifiers::COMMAND)
+                        && input.key_pressed(Key::G),
                 ],
                 input
                     .raw
@@ -1116,9 +1146,12 @@ impl App {
         // While the list is open the keyboard belongs to it: `f` is the
         // letter f, and escape closes the list rather than stopping a run.
         if !self.commands.is_open() {
-            let [open, fit, cancel, run, measure, save] = letters;
+            let [open, fit, cancel, run, measure, save, solve] = letters;
             if save {
                 self.run_command(Command::SaveProject);
+            }
+            if solve && !self.links.is_empty() {
+                self.run_command(Command::Solve);
             }
             if measure {
                 self.run_command(Command::Measure);
@@ -1178,6 +1211,15 @@ impl App {
         if !self.iterations.is_empty() && self.source_id.is_some() {
             commands.push(Command::Place);
         }
+        if matches!(self.outcome, Outcome::Registration { .. })
+            && self.source_id.is_some()
+            && self.target_id.is_some()
+        {
+            commands.push(Command::Link);
+        }
+        if !self.links.is_empty() {
+            commands.extend([Command::Solve, Command::Unlink]);
+        }
         if !self.entries.is_empty() {
             commands.push(Command::SaveProject);
         }
@@ -1191,9 +1233,12 @@ impl App {
 
     /// Does one thing, whether it was typed, clicked or chosen from the list.
     fn run_command(&mut self, command: Command) {
-        // The strip says what was written until something else has
-        // something to say, which is the next thing anyone does.
+        // The strip says what was written, or solved, until something else
+        // has something to say — which is the next thing anyone does.
         self.saved = None;
+        if !matches!(command, Command::Solve) {
+            self.solved = None;
+        }
         match command {
             Command::Open => self.open(),
             Command::Demo(demo) => {
@@ -1280,6 +1325,12 @@ impl App {
             }
             Command::Export => self.export(),
             Command::Place => self.place(),
+            Command::Link => self.link(),
+            Command::Unlink => {
+                self.links.clear();
+                self.solved = None;
+            }
+            Command::Solve => self.solve(),
             Command::SaveProject => self.save_project(),
             Command::OpenProject => self.open_project(),
             Command::Clear => {
@@ -1295,6 +1346,10 @@ impl App {
                 self.iterations.clear();
                 self.failure = None;
                 self.opening.clear();
+                self.links.clear();
+                self.solved = None;
+                self.pending_edges.clear();
+                self.opening_order.clear();
             }
         }
     }
@@ -1379,6 +1434,18 @@ impl eframe::App for App {
         if now - self.camera_moved < SETTLE {
             ui.ctx().request_repaint();
         }
+        // The two survey commands, driven once each, for the harness that
+        // cannot click. Guarded on there being something to link so that it
+        // waits for the registration rather than firing at an empty scene.
+        if self.bench.as_ref().is_some_and(Bench::survey) {
+            if self.links.is_empty() {
+                if matches!(self.outcome, Outcome::Registration { .. }) {
+                    self.run_command(Command::Link);
+                }
+            } else if self.solved.is_none() {
+                self.run_command(Command::Solve);
+            }
+        }
         if let Some(bench) = &mut self.bench {
             bench.step(
                 ui.ctx(),
@@ -1458,6 +1525,13 @@ impl App {
         }
         if let Some((name, seconds)) = &self.saved {
             return (palette.high, format!("wrote {name} in {seconds:.2} s"));
+        }
+        // A solve is the loudest thing this application does — every scan
+        // in the scene moves — so what it did belongs where the person is
+        // already looking, and not only in a panel section they may have
+        // scrolled past.
+        if let Some(note) = &self.solved {
+            return (palette.high, note.clone());
         }
         match &self.work {
             Work::Running { step, .. } => {
@@ -1628,6 +1702,12 @@ impl App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.clouds_section(ui, palette);
+                        // Directly under the scene, because that is what it
+                        // is about: which scans are joined to which. Below
+                        // the report it sat under two hundred pixels of
+                        // spectrum and pose, where a person who had not been
+                        // told it existed would not find it.
+                        self.survey_section(ui, palette);
                         ui.add_space(space::GROUP);
                         self.section_section(ui, palette);
                         ui.add_space(space::GROUP);
@@ -1998,6 +2078,71 @@ impl App {
             );
         }
         self.section = section;
+    }
+
+    /// The survey: one row per edge, and what the last solve did.
+    ///
+    /// Shown only once there is an edge. A section that says "no edges" to
+    /// everyone who has not built a survey is a section that costs every
+    /// user of the pair-at-a-time application some space to be told
+    /// something they knew.
+    fn survey_section(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        if self.links.is_empty() {
+            return;
+        }
+        ui.add_space(space::GROUP);
+        heading(ui, palette, "survey");
+
+        let mut remove = None;
+        for (index, link) in self.links.iter().enumerate() {
+            let name = |id: u64| {
+                self.entry(Some(id))
+                    .map_or_else(|| "—".to_owned(), |entry| entry.name().to_owned())
+            };
+            // The count is the whole point of the row: an edge that
+            // determined five of six is an edge the solve will not lean on
+            // in the sixth direction, and this is where that is visible.
+            let (colour, note) = match link.determined {
+                6 => (palette.high, "all six".to_owned()),
+                n => (palette.medium, format!("{n} of 6")),
+            };
+            ui.horizontal(|ui| {
+                bullet(ui, colour);
+                ui.add_space(space::TIGHT);
+                ui.label(
+                    RichText::new(format!("{}  to  {}", name(link.from), name(link.to)))
+                        .color(palette.text)
+                        .size(11.0),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Label::new(RichText::new("×").color(palette.faint).size(12.0))
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_text("forget this edge")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(format!("{note} determined · rmse {}", metres(link.rmse)))
+                    .color(palette.muted)
+                    .size(10.0),
+            );
+            ui.add_space(space::TIGHT);
+        }
+        if let Some(index) = remove {
+            self.links.remove(index);
+            self.solved = None;
+        }
+
+        if let Some(note) = &self.solved {
+            ui.add_space(space::TIGHT);
+            ui.label(RichText::new(note).color(palette.muted).size(10.0));
+        }
     }
 
     fn spectrum_section(&mut self, ui: &mut egui::Ui, palette: &Palette) {
@@ -2433,6 +2578,52 @@ impl App {
                 ui.painter()
                     .rect_filled(rect, 0.0, palette.accent.gamma_multiply(0.12));
                 centred_note(ui, palette, rect, "drop to load");
+            }
+
+            // The survey, drawn as it is: a line for every edge, between
+            // the two scans it joins, at the pose each of them currently
+            // has. It moves when the solve moves them, which is the only
+            // way to see that the solve did anything.
+            if !self.links.is_empty() {
+                let shape = viewport_pixels(rect, ui.ctx().pixels_per_point());
+                let projection = self
+                    .camera
+                    .view_projection(shape[0] as f32 / shape[1].max(1) as f32);
+                let origin = self.origin();
+                let local = |at: na::Vector3<f64>| {
+                    let at = at - origin;
+                    na::Point3::new(at.x as f32, at.y as f32, at.z as f32)
+                };
+                // A node is drawn where its scan's own origin ends up. Not
+                // the centroid of its points: two scans of the same room
+                // have nearly the same centroid, and the graph would be a
+                // knot at one spot rather than a trajectory.
+                let station = |id: u64| -> Option<na::Vector3<f64>> {
+                    let entry = self.entry(Some(id))?;
+                    Some(self.placement(entry).transform_point(&entry.cloud.origin()))
+                };
+                for link in &self.links {
+                    let (Some(from), Some(to)) = (station(link.from), station(link.to)) else {
+                        continue;
+                    };
+                    let ends = [
+                        project(&projection, local(from), rect),
+                        project(&projection, local(to), rect),
+                    ];
+                    let [Some(a), Some(b)] = ends else { continue };
+                    // An edge that lost a direction is drawn in the colour
+                    // the spectrum uses for a direction it lost. The graph
+                    // and the σ panel should not need translating between.
+                    let colour = if link.determined == 6 {
+                        palette.high
+                    } else {
+                        palette.medium
+                    };
+                    ui.painter().line_segment([a, b], Stroke::new(2.0, colour));
+                    for at in [a, b] {
+                        ui.painter().circle_filled(at, 4.0, colour);
+                    }
+                }
             }
 
             // The picked pairs: each end where its own cloud has it, and
@@ -2930,6 +3121,134 @@ impl App {
         self.rebase();
     }
 
+    /// Turns a project's edges into survey edges, once its scans are here.
+    ///
+    /// An edge whose scan failed to load is dropped rather than repaired:
+    /// the file said which two scans, one of them is not here, and there is
+    /// no second-best answer to which one it meant. How many were dropped
+    /// is said out loud, because a survey quietly missing an edge optimises
+    /// perfectly well and to the wrong answer.
+    fn adopt_edges(&mut self) {
+        if self.pending_edges.is_empty() {
+            return;
+        }
+        let id_at = |position: usize| -> Option<u64> {
+            let path = self.opening_order.get(position)?;
+            self.entries
+                .iter()
+                .find(|entry| &entry.path == path)
+                .map(|entry| entry.id)
+        };
+        let wanted = self.pending_edges.len();
+        self.links = self
+            .pending_edges
+            .drain(..)
+            .filter_map(|edge| {
+                Some(Link {
+                    from: id_at(edge.from)?,
+                    to: id_at(edge.to)?,
+                    measurement: edge.measurement,
+                    information: edge.information,
+                    determined: edge.determined,
+                    rmse: edge.rmse,
+                })
+            })
+            .collect();
+        self.opening_order.clear();
+        let lost = wanted - self.links.len();
+        self.solved = (lost > 0)
+            .then(|| format!("{lost} of {wanted} edges dropped: a scan they name did not load"));
+    }
+
+    /// Keeps the current registration as an edge of the survey.
+    ///
+    /// The measurement is the pose the solver *finished* at, not the one
+    /// the timeline is scrubbed to. The weight comes from the conditioning
+    /// of that run, and pairing a pose from iteration seven with a matrix
+    /// computed at iteration fifty would be an edge describing two
+    /// different moments — which is exactly the kind of thing that produces
+    /// a survey that is slightly wrong for no visible reason.
+    ///
+    /// An edge between the same two scans replaces the older one. A survey
+    /// that accumulated every attempt would weight the pair by how many
+    /// times somebody pressed run.
+    fn link(&mut self) {
+        let (Some(from), Some(to)) = (self.target_id, self.source_id) else {
+            return;
+        };
+        let Outcome::Registration { outcome, .. } = &self.outcome else {
+            return;
+        };
+        let link = Link::new(
+            from,
+            to,
+            outcome.result.pose,
+            outcome.result.rmse,
+            &outcome.analysis.conditioning,
+            &self.report.criteria(),
+        );
+        self.links
+            .retain(|old| !(old.from == from && old.to == to || old.from == to && old.to == from));
+        self.links.push(link);
+        self.solved = None;
+    }
+
+    /// Solves the survey and moves every scan to where the edges put it.
+    ///
+    /// The anchor is the first cloud in the scene, and it stays where it
+    /// is. Some node has to: a pose graph determines its nodes only up to a
+    /// common rigid motion. The first rather than the target, because the
+    /// target changes when somebody clicks a chip and a survey that jumped
+    /// to a different origin each time would be unusable.
+    fn solve(&mut self) {
+        let nodes: Vec<(u64, Se3)> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.id, entry.pose))
+            .collect();
+        if nodes.is_empty() {
+            return;
+        }
+        let origin = self.origin();
+        let started = std::time::Instant::now();
+        let Some(result) = survey::solve(
+            &nodes,
+            &self.links,
+            0,
+            &origin,
+            &rigidity_graph::OptimiseParams::default(),
+        ) else {
+            self.solved = Some("no edge joins two loaded scans".to_owned());
+            return;
+        };
+        match result {
+            Ok(solved) => {
+                let mut moved: f64 = 0.0;
+                for (entry, pose) in self.entries.iter_mut().zip(&solved.poses) {
+                    moved = moved.max((entry.pose.translation() - pose.translation()).norm());
+                    entry.pose = *pose;
+                }
+                let [before, after] = solved.report.cost;
+                self.solved = Some(format!(
+                    "{} edge{} · cost {before:.3e} down to {after:.3e} · \
+                     worst scan moved {} m · {:.1} ms",
+                    self.links.len(),
+                    if self.links.len() == 1 { "" } else { "s" },
+                    metres(moved),
+                    started.elapsed().as_secs_f64() * 1e3,
+                ));
+                // The solve changed where the scans are, so whatever the
+                // report was about is about two clouds that have moved.
+                self.rebase();
+                self.request();
+                if let Some((min, max)) = self.bounds() {
+                    self.section.frame(min, max);
+                }
+            }
+            Err(error) => self.solved = Some(error.to_string()),
+        }
+    }
+
     /// Writes the scene to a project file.
     ///
     /// What is written is each scan's *own* pose, not where it happens to
@@ -2970,8 +3289,35 @@ impl App {
         let generated = self.entries.len() - scans.len();
         let written = scans.len();
 
+        // Edges name scans by position in the file, and generated clouds
+        // are not in the file, so the positions are of what was written.
+        // An edge whose end did not survive that filter is dropped and
+        // counted rather than renumbered onto whichever scan happens to sit
+        // at its index.
+        let position = |id: u64| {
+            self.entries
+                .iter()
+                .filter(|entry| !entry.generated)
+                .position(|entry| entry.id == id)
+        };
+        let edges: Vec<_> = self
+            .links
+            .iter()
+            .filter_map(|link| {
+                Some(project::EdgeRecord {
+                    from: position(link.from)?,
+                    to: position(link.to)?,
+                    measurement: link.measurement,
+                    information: link.information,
+                    determined: link.determined,
+                    rmse: link.rmse,
+                })
+            })
+            .collect();
+        let dropped = self.links.len() - edges.len();
+
         let started = std::time::Instant::now();
-        match (Project { scans }).write(&path) {
+        match (Project { scans, edges }).write(&path) {
             Ok(()) => {
                 let mut note = format!(
                     "{written} scan{} written",
@@ -2981,6 +3327,12 @@ impl App {
                     note.push_str(&format!(
                         " — {generated} generated cloud{} left out, having no file to name",
                         if generated == 1 { "" } else { "s" }
+                    ));
+                }
+                if dropped > 0 {
+                    note.push_str(&format!(
+                        " — {dropped} edge{} left out, an end of each being a generated cloud",
+                        if dropped == 1 { "" } else { "s" }
                     ));
                 }
                 if !self.iterations.is_empty() {
@@ -3006,6 +3358,11 @@ impl App {
                 for scan in &project.scans {
                     self.engine.load(scan.path.clone());
                 }
+                // Edges name scans by position and the clouds arrive with
+                // identifiers, so they wait here until every scan they name
+                // has landed.
+                self.pending_edges = project.edges;
+                self.opening_order = project.scans.iter().map(|scan| scan.path.clone()).collect();
                 self.opening = project.scans;
             }
             // The scene is left alone. A project that will not parse is a

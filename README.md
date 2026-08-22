@@ -82,6 +82,7 @@ spectrum is drawn faint and says so. Believe the residual first.
 | `F` | fit the view |
 | `M` | measure between two points |
 | `⌘S` | save the project |
+| `⌘G` | solve the survey |
 | shift-drag | lasso: keep or delete what it encloses |
 | drag | orbit · right-drag pan · wheel dolly |
 
@@ -132,6 +133,33 @@ A registration is not written until it is **placed** — `⌘K`, *place the
 source where the registration put it* — which moves the scan's own pose to
 where the solver left it. Nothing on screen moves when you do: what changes
 is whether the position survives the next run.
+
+## The survey
+
+A registration is a fact about two scans. A survey is many of them, and the
+thing worth having is what they say together.
+
+Register a pair, then **keep this registration as a survey edge** in `⌘K`.
+The edge carries the weight its own conditioning justifies: the directions
+the geometry determined, and *nothing at all* along the ones it did not. On
+a corridor that is five of six, and the row in the **survey** panel says so.
+Every other package in this space takes the registration's `JᵀWJ` at face
+value, which is confident about the corridor's own axis and wrong.
+
+**Solve the survey** — `⌘G` — moves every scan so the edges agree as well as
+their weights say they can, and the status strip reports what it cost and
+how far the worst scan moved. The first cloud in the scene is the anchor and
+stays where it is; a pose graph fixes its nodes only up to a common rigid
+motion, and some node has to be the survey's origin.
+
+The edges are drawn in the viewport between the scans they join, amber where
+a registration did not determine all six directions. They are saved with the
+project, weight and all: an edge is a decision about a run that has since
+been replaced, and rebuilding it would mean running that registration again.
+
+On a synthetic loop with one leg down a corridor, this is worth a factor of
+about 120 in the worst scan's drift — the measurement is in `rigidity`'s
+`rigidity-graph`, and it is the reason this project exists.
 
 Twenty scans of a million points is seven times what the viewport can draw
 at 60 fps, so each large scan keeps a coarse copy and the viewport draws

@@ -2931,6 +2931,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rigidity-graph"
+version = "0.1.1"
+dependencies = [
+ "rigidity-core",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rigidity-io"
 version = "0.1.1"
 dependencies = [
@@ -2977,6 +2985,7 @@ dependencies = [
  "eframe",
  "rfd",
  "rigidity-core",
+ "rigidity-graph",
  "rigidity-io",
  "rigidity-pipeline",
  "rigidity-scenes",

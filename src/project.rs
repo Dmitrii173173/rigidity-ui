@@ -90,10 +90,40 @@ pub(crate) struct Scan {
     pub(crate) prepare: Option<PrepareParams>,
 }
 
+/// One survey edge, saved.
+///
+/// Scans are named by their position in the file rather than by path: the
+/// file is written by the application and read back by it, the positions
+/// are unambiguous, and an edge carrying two paths again would double the
+/// length of the longest line in the file for no reader's benefit. A file
+/// somebody has edited by hand into naming a scan that is not there gets a
+/// line error rather than an edge quietly pointing at its neighbour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EdgeRecord {
+    /// Index of the scan the measurement is expressed in.
+    pub(crate) from: usize,
+    /// Index of the scan it measures.
+    pub(crate) to: usize,
+    /// `Z`, as twelve numbers, for the reason [`Scan::pose`] is twelve.
+    pub(crate) measurement: Se3,
+    /// The weight: the upper triangle of a symmetric 6×6, twenty-one
+    /// numbers.
+    ///
+    /// Stored rather than rebuilt, because rebuilding it would mean running
+    /// the registration again — and the whole point of an edge is that it
+    /// is a decision already taken about a run that has since been replaced.
+    pub(crate) information: na::Matrix6<f64>,
+    /// How many of the six directions that registration determined.
+    pub(crate) determined: usize,
+    /// The residual it was made at, metres.
+    pub(crate) rmse: f64,
+}
+
 /// A scene, saved.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Project {
     pub(crate) scans: Vec<Scan>,
+    pub(crate) edges: Vec<EdgeRecord>,
 }
 
 /// What a project file can be wrong about.
@@ -210,6 +240,35 @@ impl Project {
             out.push_str(if scan.visible { "yes" } else { "no" });
             out.push('\n');
         }
+
+        for edge in &self.edges {
+            out.push_str(&format!("\nedge  {} {}", edge.from, edge.to));
+            let rotation = edge.measurement.rotation().matrix();
+            let translation = edge.measurement.translation();
+            out.push_str("\npose ");
+            for row in 0..3 {
+                for column in 0..3 {
+                    out.push(' ');
+                    out.push_str(&number(rotation[(row, column)]));
+                }
+            }
+            for axis in 0..3 {
+                out.push(' ');
+                out.push_str(&number(translation[axis]));
+            }
+            out.push_str("\nweight");
+            for row in 0..6 {
+                for column in row..6 {
+                    out.push(' ');
+                    out.push_str(&number(edge.information[(row, column)]));
+                }
+            }
+            out.push_str(&format!(
+                "\nseen  {}\nrmse  {}\n",
+                edge.determined,
+                number(edge.rmse)
+            ));
+        }
         out
     }
 
@@ -228,6 +287,10 @@ impl Project {
         }
 
         let mut scans: Vec<Scan> = Vec::new();
+        let mut edges: Vec<EdgeRecord> = Vec::new();
+        // Which kind of record the keys below belong to. A `scan` or an
+        // `edge` line opens one; everything after describes it.
+        let mut current = Record::None;
         for (index, line) in lines {
             let number = index + 1;
             let line = line.trim();
@@ -256,6 +319,69 @@ impl Project {
                     role: Role::Idle,
                     prepare: None,
                 });
+                current = Record::Scan;
+                continue;
+            }
+
+            if key == "edge" {
+                let ends: Vec<usize> = rest
+                    .split_whitespace()
+                    .map(|word| word.parse::<usize>().unwrap_or(usize::MAX))
+                    .collect();
+                let [from, to] = ends[..] else {
+                    return Err(Error::Line {
+                        number,
+                        problem: "an edge names two scans by their position in this file",
+                    });
+                };
+                if from >= scans.len() || to >= scans.len() {
+                    return Err(Error::Line {
+                        number,
+                        problem: "an edge names a scan that is not in this file",
+                    });
+                }
+                if from == to {
+                    return Err(Error::Line {
+                        number,
+                        problem: "an edge joins a scan to itself",
+                    });
+                }
+                edges.push(EdgeRecord {
+                    from,
+                    to,
+                    measurement: Se3::identity(),
+                    information: na::Matrix6::zeros(),
+                    determined: 0,
+                    rmse: 0.0,
+                });
+                current = Record::Edge;
+                continue;
+            }
+
+            if current == Record::Edge {
+                let edge = edges.last_mut().expect("an edge was opened");
+                match key {
+                    "pose" => edge.measurement = pose(rest, number)?,
+                    "weight" => edge.information = information(rest, number)?,
+                    "seen" => {
+                        edge.determined = rest.parse().map_err(|_| Error::Line {
+                            number,
+                            problem: "seen is a whole number of directions",
+                        })?
+                    }
+                    "rmse" => {
+                        edge.rmse = rest.parse().map_err(|_| Error::Line {
+                            number,
+                            problem: "rmse is one number, in metres",
+                        })?
+                    }
+                    _ => {
+                        return Err(Error::Line {
+                            number,
+                            problem: "unknown key",
+                        });
+                    }
+                }
                 continue;
             }
 
@@ -335,8 +461,42 @@ impl Project {
             }
         }
 
-        Ok(Self { scans })
+        Ok(Self { scans, edges })
     }
+}
+
+/// Which kind of record the keys are describing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    None,
+    Scan,
+    Edge,
+}
+
+/// Twenty-one numbers back into a symmetric 6×6.
+fn information(rest: &str, number: usize) -> Result<na::Matrix6<f64>, Error> {
+    let complain = || Error::Line {
+        number,
+        problem: "a weight is twenty-one numbers: the upper triangle of a symmetric 6x6",
+    };
+    let values: Vec<f64> = rest
+        .split_whitespace()
+        .map(|word| word.parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| complain())?;
+    if values.len() != 21 {
+        return Err(complain());
+    }
+    let mut out = na::Matrix6::zeros();
+    let mut next = values.into_iter();
+    for row in 0..6 {
+        for column in row..6 {
+            let value = next.next().expect("twenty-one counted above");
+            out[(row, column)] = value;
+            out[(column, row)] = value;
+        }
+    }
+    Ok(out)
 }
 
 /// One `f64`, written so that reading it back gives the same bits.
@@ -440,7 +600,10 @@ mod tests {
 
     impl From<Vec<Scan>> for Project {
         fn from(scans: Vec<Scan>) -> Self {
-            Self { scans }
+            Self {
+                scans,
+                edges: Vec::new(),
+            }
         }
     }
 
@@ -508,6 +671,100 @@ mod tests {
     }
 
     /// A scan with no parameters of its own says nothing about them.
+    /// An edge survives the round trip: its weight, its measurement, and
+    /// which two scans it joins.
+    ///
+    /// The weight is twenty-one numbers of a symmetric matrix, and it is the
+    /// part with somewhere to go wrong — a triangle written by rows and read
+    /// by columns is still symmetric, still plausible, and wrong.
+    #[test]
+    fn an_edge_comes_back_the_way_it_went_in() {
+        let mut information = na::Matrix6::zeros();
+        for row in 0..6 {
+            for column in 0..6 {
+                // Deliberately not symmetric in its *pattern*: entry (r,c)
+                // and (c,r) must be equal, but no two entries anywhere else
+                // are, so a transposed read is caught.
+                let value = (row.min(column) * 6 + row.max(column)) as f64 * 1.5 + 0.25;
+                information[(row, column)] = value;
+            }
+        }
+        let measurement = Se3::from_parts(
+            So3::exp(&na::Vector3::new(0.3, -0.2, 0.1)),
+            na::Vector3::new(1.25, -3.5, 0.125),
+        );
+        let project = Project {
+            scans: (0..3)
+                .map(|index| Scan {
+                    path: PathBuf::from(format!("scan-{index}.ply")),
+                    pose: Se3::identity(),
+                    visible: true,
+                    role: Role::Idle,
+                    prepare: None,
+                })
+                .collect(),
+            edges: vec![EdgeRecord {
+                from: 2,
+                to: 0,
+                measurement,
+                information,
+                determined: 5,
+                rmse: 1.234e-3,
+            }],
+        };
+
+        let base = Path::new("/surveys/x");
+        let after = Project::parse(&project.render(base), base).expect("parses");
+        assert_eq!(after.edges.len(), 1);
+        let edge = after.edges[0];
+        assert_eq!((edge.from, edge.to), (2, 0));
+        assert_eq!(edge.determined, 5);
+        assert_eq!(edge.rmse.to_bits(), 1.234e-3f64.to_bits());
+        assert_eq!(bits(&edge.measurement), bits(&measurement));
+        for row in 0..6 {
+            for column in 0..6 {
+                assert_eq!(
+                    edge.information[(row, column)].to_bits(),
+                    information[(row, column)].to_bits(),
+                    "weight ({row},{column})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_edge_naming_a_scan_that_is_not_there_is_an_error() {
+        for line in ["edge 0 5", "edge 5 0", "edge 0 0", "edge 0", "edge 0 1 2"] {
+            let text = format!("{MAGIC} {VERSION}\nscan a.ply\nscan b.ply\n{line}\n");
+            assert!(
+                matches!(
+                    Project::parse(&text, Path::new("")),
+                    Err(Error::Line { .. })
+                ),
+                "{line:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_weight_of_the_wrong_length_is_an_error() {
+        let text = format!("{MAGIC} {VERSION}\nscan a.ply\nscan b.ply\nedge 0 1\nweight 1 2 3\n");
+        assert!(matches!(
+            Project::parse(&text, Path::new("")),
+            Err(Error::Line { .. })
+        ));
+    }
+
+    /// A key that belongs to a scan does not silently land on an edge.
+    #[test]
+    fn a_scan_key_after_an_edge_is_an_error() {
+        let text = format!("{MAGIC} {VERSION}\nscan a.ply\nscan b.ply\nedge 0 1\nshown no\n");
+        assert!(matches!(
+            Project::parse(&text, Path::new("")),
+            Err(Error::Line { .. })
+        ));
+    }
+
     #[test]
     fn an_untuned_scan_writes_no_parameters() {
         let project = Project {
@@ -518,6 +775,7 @@ mod tests {
                 role: Role::Idle,
                 prepare: None,
             }],
+            edges: Vec::new(),
         };
         let text = project.render(Path::new(""));
         assert!(!text.contains("voxel"), "{text}");
@@ -569,6 +827,7 @@ mod tests {
                 role: Role::Idle,
                 prepare: None,
             }],
+            edges: Vec::new(),
         };
         let base = Path::new("/surveys/hauptgebaude");
         let text = project.render(base);
@@ -592,6 +851,7 @@ mod tests {
                 role: Role::Idle,
                 prepare: None,
             }],
+            edges: Vec::new(),
         };
         let base = Path::new("/elsewhere");
         let after = Project::parse(&project.render(base), base).unwrap();
