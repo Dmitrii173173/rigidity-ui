@@ -1,3 +1,7 @@
+<img width="2560" height="2140" alt="rigidity-ui-hero" src="https://github.com/user-attachments/assets/ad6d303a-fae8-4bf9-b2de-7802cbd7663c" />
+
+
+
 # rigidity-ui
 
 **A viewer for [`rigidity`](https://github.com/Dmitrii173173/rigidity): register two point clouds and see
