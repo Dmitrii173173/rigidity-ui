@@ -1073,9 +1073,9 @@ scheduled — the decision happens at S1's gate, against a real point count.
   `rigidity-graph` upstream (§7.7) and calls it from here in the same
   sitting; a pinned dependency would put a publish between every two edits.
   CI resolves it the other way, checking both repositories out side by side
-  — that is what the `RIGIDITY_REPOSITORY` variable is for. Revisit when the
-  viewer is released, which is the first time an outside builder has to
-  resolve these paths without the sibling directory.
+  by name. Revisit when a builder who is neither this machine nor CI has to
+  resolve these paths — the README's build section is the interim answer,
+  and it says clone both.
 - **wgpu's API moves between majors.** wgpu 30 renamed
   `push_constant_ranges` to `immediate_size` and made both
   `bind_group_layouts` and `VertexState::buffers` take `Option`s; egui 0.36

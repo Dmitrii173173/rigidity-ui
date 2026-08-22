@@ -22,20 +22,16 @@ jobs:
           path: rigidity-ui
 
       # This crate depends on ../rigidity by path, so the sibling has to be
-      # beside it. The address is a repository variable rather than a name
-      # written here: the core has no remote yet, and inventing one would
-      # produce a workflow that looks configured and is not.
-      - name: where is rigidity?
-        shell: bash
-        run: |
-          if [ -z "${{ vars.RIGIDITY_REPOSITORY }}" ]; then
-            echo "::error::Set the repository variable RIGIDITY_REPOSITORY to"
-            echo "::error::the owner/name of the rigidity core repository."
-            exit 1
-          fi
+      # beside it. The address is written here rather than held in a
+      # repository variable: it used to be a variable because the core had
+      # no remote and inventing one would have produced a workflow that
+      # looked configured and was not. The core is public now, so the
+      # variable had stopped being honesty and become a manual step that
+      # can be forgotten -- and a CI that fails on a setting nobody set
+      # teaches nothing.
       - uses: actions/checkout@v4
         with:
-          repository: ${{ vars.RIGIDITY_REPOSITORY }}
+          repository: Dmitrii173173/rigidity
           path: rigidity
 
       # Installs whatever rust-toolchain.toml names — 1.97.1, the same
@@ -76,16 +72,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: rigidity-ui
-      - name: where is rigidity?
-        shell: bash
-        run: |
-          if [ -z "${{ vars.RIGIDITY_REPOSITORY }}" ]; then
-            echo "::error::Set the repository variable RIGIDITY_REPOSITORY."
-            exit 1
-          fi
       - uses: actions/checkout@v4
         with:
-          repository: ${{ vars.RIGIDITY_REPOSITORY }}
+          repository: Dmitrii173173/rigidity
           path: rigidity
       - name: toolchain
         working-directory: rigidity-ui
