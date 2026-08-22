@@ -6,7 +6,7 @@ links `rigidity-core`, `rigidity-io`, `rigidity-scenes`,
 `rigidity-pipeline` and `rigidity-spatial` directly, so whatever licence
 covers them covers the application built on top of them.
 
-Copyright (C) 2026 Dmitrii <dmytroyatskovskiy@gmail.com>
+Copyright (C) 2026 Perfilev Dmitrii <dmitrii.perfilev2020@gmail.com>
 
 ## 1. GNU AGPL-3.0
 
@@ -26,7 +26,7 @@ For shipping the viewer, or anything derived from it, inside a closed
 product; for hosting it as a service; for redistributing it under your own
 terms. Removes the copyleft obligation.
 
-Write to **dmytroyatskovskiy@gmail.com**.
+Write to **dmitrii.perfilev2020@gmail.com**.
 
 ## Appropriate Legal Notices
 
