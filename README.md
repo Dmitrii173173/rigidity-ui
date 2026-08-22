@@ -12,6 +12,11 @@ This application exists to make the ambiguous direction visible.
 cargo run --release -- target.ply source.ply
 ```
 
+PLY, LAS, LAZ, E57, PCD and CSV go in; everything but CSV comes out again —
+**save a cloud to a file…** in `⌘K`, where the extension you type chooses
+the format. A cloud saved as `.laz` is compressed and one saved as `.e57`
+is not, and there is no second control anywhere to say so.
+
 Or open it with nothing and press the **corridor** demo: it builds a scene
 whose null space is known analytically, and a copy of it displaced by a
 known amount, so there is something to look at within a second of starting.
@@ -70,6 +75,8 @@ spectrum is drawn faint and says so. Believe the residual first.
 | `space` | run |
 | `esc` | stop |
 | `F` | fit the view |
+| `M` | measure between two points |
+| shift-drag | lasso: keep or delete what it encloses |
 | drag | orbit · right-drag pan · wheel dolly |
 
 Files can also be dropped on the window. Anything that is not a parameter
@@ -129,4 +136,10 @@ degeneracy-weighted pose graph, which is the part no other tool does.
 
 ## License
 
-MIT or Apache-2.0, at your option — the same as `rigidity`.
+Dual-licensed: **AGPL-3.0-only**, or a commercial licence — the same as
+`rigidity`, and not a separate decision, since this application links those
+crates directly.
+
+Free under the [AGPL](LICENSE) for students, research, personal use and
+evaluation. Closed products and hosted services need the commercial
+licence: [`LICENSING.md`](LICENSING.md).

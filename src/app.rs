@@ -254,6 +254,8 @@ pub(crate) struct App {
     picking: Option<(u64, Purpose)>,
     /// Where a registration starts from when there are no iterations yet.
     initial: Se3,
+    /// The last file written, for the strip to say so.
+    saved: Option<(String, f64)>,
     prepare: PrepareParams,
     report: ReportParams,
     registration: RegisterParams,
@@ -304,6 +306,7 @@ impl App {
             pairing: None,
             picking: None,
             initial: Se3::identity(),
+            saved: None,
             // The command line's defaults, deliberately. The parameters two
             // front ends disagree about first are the ones nobody typed.
             prepare: PrepareParams::default(),
@@ -512,7 +515,10 @@ impl App {
     fn drain_events(&mut self) {
         for event in self.engine.poll().collect::<Vec<_>>() {
             match event {
-                Event::Started(path) => self.reading = Some(path),
+                Event::Started(path) => {
+                    self.reading = Some(path);
+                    self.saved = None;
+                }
 
                 Event::Loaded {
                     path,
@@ -670,6 +676,9 @@ impl App {
                     }
                 }
 
+                Event::Saved { path, seconds } => {
+                    self.saved = Some((file_name(&path), seconds));
+                }
                 Event::Failed(error) => {
                     self.failure = Some(error);
                     self.reading = None;
@@ -830,7 +839,7 @@ impl App {
         // The dialog blocks, and on every platform this application runs on
         // it is modal anyway: there is nothing behind it to interact with.
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("point cloud", &["ply"])
+            .add_filter("point cloud", rigidity_io::READABLE)
             .pick_file()
         {
             self.engine.load(path);
@@ -921,7 +930,7 @@ impl App {
             commands.extend([Command::Keep, Command::Drop]);
         }
         if !self.entries.is_empty() {
-            commands.extend([Command::Subsample, Command::Measure]);
+            commands.extend([Command::Subsample, Command::Measure, Command::Export]);
         }
         if matches!(self.outcome, Outcome::Registration { .. }) {
             commands.push(Command::Residuals);
@@ -932,6 +941,9 @@ impl App {
 
     /// Does one thing, whether it was typed, clicked or chosen from the list.
     fn run_command(&mut self, command: Command) {
+        // The strip says what was written until something else has
+        // something to say, which is the next thing anyone does.
+        self.saved = None;
         match command {
             Command::Open => self.open(),
             Command::Demo(demo) => {
@@ -1008,6 +1020,7 @@ impl App {
                 self.pairs.clear();
                 self.pairing = None;
             }
+            Command::Export => self.export(),
             Command::Clear => {
                 self.selection = None;
                 self.lasso.clear();
@@ -1165,6 +1178,9 @@ impl App {
         }
         if let Some(path) = &self.reading {
             return (palette.medium, format!("reading {}…", file_name(path)));
+        }
+        if let Some((name, seconds)) = &self.saved {
+            return (palette.high, format!("wrote {name} in {seconds:.2} s"));
         }
         match &self.work {
             Work::Running { step, .. } => {
@@ -2489,6 +2505,26 @@ impl App {
         let mut columns = [0.0f32; 16];
         columns.copy_from_slice(matrix.as_slice());
         Some((entry.held(), columns, size))
+    }
+
+    /// Writes a cloud where the person says.
+    ///
+    /// The cloud whose controls are open, or the target: the same rule
+    /// every other question about "which one" uses. The format follows the
+    /// extension they type, so saving as `.laz` compresses and saving as
+    /// `.e57` does not need a second control anywhere.
+    fn export(&self) {
+        let Some(entry) = self.entry(self.selected).or_else(|| self.target()) else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("point cloud", rigidity_io::WRITABLE)
+            .set_file_name(entry.name())
+            .save_file()
+        else {
+            return;
+        };
+        self.engine.save(entry.held(), path);
     }
 
     /// Makes a new cloud from the selection, or from the whole of one.

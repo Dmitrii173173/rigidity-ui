@@ -141,6 +141,11 @@ impl Engine {
         id
     }
 
+    /// Queues a cloud to be written.
+    pub(crate) fn save(&self, from: Held, path: PathBuf) {
+        self.send(Job::Save { from, path });
+    }
+
     /// Queues a new cloud made from an old one.
     pub(crate) fn derive(&self, from: Held, how: Derivation, name: String) {
         self.send(Job::Derive { from, how, name });
@@ -210,7 +215,12 @@ fn run(
         Job::Load(path) => {
             emit(events, ctx, Event::Started(path.clone()));
             let start = Instant::now();
-            let event = match rigidity_io::read_ply(&path) {
+            // By extension, like everything else that opens a file. This
+            // called `read_ply` directly for a milestone after the rest of
+            // the project learned the other formats, and the only symptom
+            // was an error banner on a file that reads fine from the
+            // command line.
+            let event = match rigidity_io::read(&path) {
                 Ok(cloud) => Event::Loaded {
                     path,
                     generated: false,
@@ -290,6 +300,18 @@ fn run(
                     at: found.map(|point| [point.x, point.y, point.z]),
                 },
             );
+        }
+
+        Job::Save { from, path } => {
+            let start = Instant::now();
+            let event = match rigidity_io::write(&from.cloud, &path) {
+                Ok(()) => Event::Saved {
+                    path,
+                    seconds: start.elapsed().as_secs_f64(),
+                },
+                Err(source) => Event::Failed(PipelineError::Read { path, source }),
+            };
+            emit(events, ctx, event);
         }
 
         Job::Derive { from, how, name } => {

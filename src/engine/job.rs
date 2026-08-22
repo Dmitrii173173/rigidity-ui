@@ -211,6 +211,13 @@ pub(crate) enum Job {
         /// The cross-section in force.
         slab: ([f32; 3], f32, f32),
     },
+    /// Write a cloud to disk, in whatever format the extension names.
+    Save {
+        /// What to write.
+        from: Held,
+        /// Where, and — by its extension — how.
+        path: PathBuf,
+    },
     /// Make a new cloud from an existing one.
     ///
     /// No request identifier: it is one pass over a cloud, it lands in the
@@ -334,6 +341,13 @@ pub(crate) enum Event {
     Abandoned {
         /// Which request.
         id: u64,
+    },
+    /// A cloud reached the disk.
+    Saved {
+        /// Where it went.
+        path: PathBuf,
+        /// How long it took.
+        seconds: f64,
     },
     /// Something went wrong.
     Failed(PipelineError),

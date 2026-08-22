@@ -25,6 +25,12 @@
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- Shown in Finder's Get Info. AGPL-3.0 §5(d) does not require an
+         about screen in a program that never had one, but a bundle that
+         says nothing about its licence is a bundle nobody can trace back
+         to its source. -->
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Dmitrii. Licensed under the GNU AGPL-3.0, or commercially — see LICENSING.md.</string>
     <!-- No CFBundleDocumentTypes. Declaring .ply here would put the
          application in "Open With" and on the Dock's drop target, and then
          nothing would happen: files opened that way arrive as an Apple

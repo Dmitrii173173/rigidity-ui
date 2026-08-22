@@ -54,6 +54,8 @@ pub(crate) enum Command {
     Align,
     /// Throw the picked pairs away.
     Unpair,
+    /// Write a cloud to disk.
+    Export,
 }
 
 impl Command {
@@ -76,6 +78,7 @@ impl Command {
             Self::Measure => "measure between two points".to_owned(),
             Self::Align => "align by picking matching points".to_owned(),
             Self::Unpair => "forget the picked pairs".to_owned(),
+            Self::Export => "save a cloud to a file…".to_owned(),
         }
     }
 

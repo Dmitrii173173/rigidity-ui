@@ -32,7 +32,7 @@ without stage 2 has nowhere to put its scans.
 | W2 — Scalar fields | **done** | ramps, histogram, cloud-to-cloud distance |
 | W3 — Selection and geometry | **done** | lasso, cross-section, measure, subsample |
 | W4 — Manual alignment | **done** | point pairs, Kabsch upstream, the wrong basin escaped |
-| W5 — Formats | not started | LAS/LAZ, E57, PCD, export |
+| W5 — Formats | **done** | LAS/LAZ, E57, PCD, export; one door for all of them |
 | **Stage 3 — the survey** | | |
 | S1 — Projects | not started | many scans with poses, saved and reopened |
 | S2 — Pose graph | not started | degeneracy-weighted edges — the actual contribution |
@@ -165,7 +165,7 @@ algebra, windowing — and not otherwise.
 | Tauri / Electron + three.js | The data path is the product. Getting a million points into JS means serialising them — and `rigidity-core` has no `serde` at all. Adds a second toolchain to a project whose selling point is not needing one. |
 | Bevy | An ECS and an asset pipeline for an application with two clouds and one panel. Its UI layer would end up being `bevy_egui` anyway. |
 | iced | The most attractive default look of the Rust options, and `iced::widget::shader` can host a wgpu pass. But the 3D viewport *is* the application here, not an inset; `egui-wgpu`'s paint callback is the shorter, better-trodden path to it. Revisit if the panel work ever outgrows immediate mode. |
-| Slint | Same viewport objection, plus a licence conversation the core's MIT/Apache does not need. |
+| Slint | Same viewport objection. Its royalty-free terms are also a second licence to reason about on top of this project's own AGPL/commercial split, for a UI layer `egui` already covers. |
 | Rerun (already a dependency of `rigidity-viz`) | Excellent, and it stays — for *debugging* a registration run. It is a general viewer: it cannot put a slider next to a spectrum and re-classify on drag, which is §5's whole point. Use `rigidity-viz` when the question is "what did ICP do"; use this app when the question is "what is this answer worth". |
 | glam for camera math | A second linear-algebra crate to avoid `nalgebra`'s f32 path, which is fast enough for four matrices per frame. `convert-bytemuck` closes the only real gap. |
 
@@ -926,12 +926,37 @@ because a click cannot be simulated from a shell — the same limit that let
 three M5 features ship missing. It is written, it compiles, and it wants a
 human to try it before it is believed.
 
-**W5 — Formats.** LAS/LAZ in and out, E57 (declared in the workspace
-dependencies and still unused), PCD, and export of any entry in the list.
-*Gate:* every format round-trips at millimetre fidelity, and a
-georeferenced LAS keeps its absolute coordinates — which is what the
-`f32`-offset-from-an-`f64`-origin storage exists for, so a regression here
-is a regression in the core's central invariant.
+**W5 — Formats. Done.** PLY, LAS, LAZ, E57, PCD and CSV in;
+everything but CSV out; `read` and `write` choose by extension so neither
+front end keeps a list to fall behind on. The command line got every reader
+in the same commit, without asking.
+*Gate: passed, and it bit.* The round-trip test runs over every writable
+format twice — once at the origin and once at a UTM coordinate half a
+million metres east and four million north — and requires a millimetre.
+**PCD failed the second one at 0.125 m**, because the writer put `f32`
+absolute coordinates in the file, where the step at four million metres is
+a quarter of a metre. That is precisely the mistake the core's storage
+exists to prevent, made at the last possible moment. PCD now writes `f64`
+against PCL's own convention, and says why in the module.
+
+- **E57 could finally be written**, which is what let it be read with any
+  confidence: `rigidity`'s own plan had deferred the format "for want of
+  test data", and a format that can be written supplies its own. Reading
+  concatenates the scans a file holds, each through its own transform,
+  because everything upstream of the viewer works on one cloud at a time —
+  stage three is where scans stay apart.
+- **PCD is ours**, like PLY: a text header and a block of numbers, and a
+  dependency for that costs more than the code does.
+- **One bug worth naming.** The viewer's own loader still called `read_ply`
+  directly after the pipeline and the CLI had learned the dispatcher. The
+  only symptom was a failure banner on a file the command line opens
+  fine — and, because a viewer with nothing loaded has nothing to animate,
+  a window that sat there. The tests could not see it: they exercise the
+  library, and this was a caller.
+
+That closes stage two. The scene is a list, the numbers have a histogram, a
+lasso and a slab and a ruler work on what is on screen, three clicks escape
+a wrong basin, and the formats a survey actually arrives in go in and out.
 
 ### Stage 3 — the survey
 
