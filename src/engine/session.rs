@@ -836,6 +836,117 @@ mod tests {
         }
     }
 
+    /// Three picked pairs rescue a registration ICP cannot find alone.
+    ///
+    /// Both halves matter. A corridor turned thirty degrees is far outside
+    /// the basin ICP can reach from the identity, and the test requires it
+    /// to *fail* from there — a tool that rescues something never in
+    /// danger has not been shown to do anything.
+    ///
+    /// The picked points are deliberately imprecise, a couple of
+    /// centimetres off on each side, because a person clicking a corner in
+    /// two scans is imprecise. The closed form then lands near the answer
+    /// rather than on it, and ICP does the rest, which is the division of
+    /// labour the tool exists for.
+    #[test]
+    fn three_pairs_rescue_a_registration_from_the_wrong_basin() {
+        let scene = Scene::generate(
+            SceneKind::Corridor,
+            SceneParams {
+                points_per_face: 20_000,
+                noise_sigma: 0.002,
+                ..SceneParams::default()
+            },
+        );
+        let turn = Se3::exp(&na::Vector6::new(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            30f64.to_radians(),
+        ));
+        let turned = transform_cloud(&scene.cloud, &turn);
+
+        let source = Held {
+            cloud: Arc::new(turned),
+            generation: 1,
+        };
+        let target = Held {
+            cloud: Arc::new(scene.cloud),
+            generation: 2,
+        };
+        let prepare = PrepareParams::default();
+        let params = RegisterParams::default();
+        let mut session = Session::default();
+
+        // How far a found pose is from the one that undoes the turn.
+        let error = |pose: &Se3| (*pose * turn).log().norm();
+
+        let blind = session
+            .register(
+                &source,
+                &target,
+                &prepare,
+                &params,
+                Se3::identity(),
+                &|| false,
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .expect("the registration failed")
+            .expect("the registration was abandoned");
+        assert!(
+            error(&blind.result.pose) > 0.1,
+            "thirty degrees was supposed to be out of reach, and ICP found it \
+             from the identity anyway — the test proves nothing as written"
+        );
+
+        // Three points spread along the corridor, clicked by a shaky hand
+        // in both scans.
+        let wobble = [
+            na::Vector3::new(0.02, -0.01, 0.015),
+            na::Vector3::new(-0.015, 0.02, -0.01),
+            na::Vector3::new(0.01, 0.012, 0.02),
+        ];
+        let mut from = Vec::new();
+        let mut to = Vec::new();
+        for (offset, index) in wobble.iter().zip([0, 25_000, 55_000]) {
+            let on_target = target.cloud.point(index);
+            to.push(on_target + offset);
+            from.push(turn.transform_point(&on_target) - offset);
+        }
+        let start = rigidity_core::lie::absolute_orientation(&from, &to)
+            .expect("three spread points determine a motion");
+
+        let guided = session
+            .register(
+                &source,
+                &target,
+                &prepare,
+                &params,
+                start,
+                &|| false,
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .expect("the registration failed")
+            .expect("the registration was abandoned");
+        let found = error(&guided.result.pose);
+        assert!(
+            found < 0.02,
+            "three pairs put it {found} away from the truth, which is not a rescue"
+        );
+        // And the clicks were not already the answer: the solver improved
+        // on them, which is the division of labour this tool assumes.
+        let clicked = error(&start);
+        assert!(
+            clicked > found,
+            "the picked pose was {clicked} away and the registration {found} — \
+             if the clicks were already right, the test is measuring nothing"
+        );
+    }
+
     /// The correction multiplies the noise and nothing else.
     ///
     /// It is a statement about how many measurements are really

@@ -49,6 +49,11 @@ pub(crate) enum Command {
     Subsample,
     /// Pick two points and read the distance between them.
     Measure,
+    /// Pick matching points on the two clouds and solve for the motion
+    /// between them.
+    Align,
+    /// Throw the picked pairs away.
+    Unpair,
 }
 
 impl Command {
@@ -69,6 +74,8 @@ impl Command {
             Self::Drop => "delete the selection into a new cloud".to_owned(),
             Self::Subsample => "subsample at the voxel size".to_owned(),
             Self::Measure => "measure between two points".to_owned(),
+            Self::Align => "align by picking matching points".to_owned(),
+            Self::Unpair => "forget the picked pairs".to_owned(),
         }
     }
 

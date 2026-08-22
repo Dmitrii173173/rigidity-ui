@@ -82,6 +82,15 @@ enum Work {
     Cancelled,
 }
 
+/// What a click is being asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// An end of a measurement.
+    Measure,
+    /// One half of a correspondence, on the source or on the target.
+    Pair { on_source: bool },
+}
+
 /// What a lasso enclosed.
 struct Selection {
     /// Which cloud the indices are into.
@@ -232,8 +241,19 @@ pub(crate) struct App {
     measurement: Vec<na::Point3<f32>>,
     /// Whether the next click adds an end to it.
     measuring_points: bool,
-    /// A pick on its way back.
-    picking: Option<u64>,
+    /// Matching points clicked on the two clouds, each in its own cloud's
+    /// absolute coordinates.
+    ///
+    /// Absolute and per-cloud rather than in the drawing frame: what the
+    /// solver wants is the motion carrying one cloud's coordinates onto
+    /// the other's, and that is what these are.
+    pairs: Vec<(na::Vector3<f64>, na::Vector3<f64>)>,
+    /// Whether clicks are pairing, and which cloud the next one is on.
+    pairing: Option<bool>,
+    /// A pick on its way back, and what it is for.
+    picking: Option<(u64, Purpose)>,
+    /// Where a registration starts from when there are no iterations yet.
+    initial: Se3,
     prepare: PrepareParams,
     report: ReportParams,
     registration: RegisterParams,
@@ -280,7 +300,10 @@ impl App {
             selecting: None,
             measurement: Vec::new(),
             measuring_points: false,
+            pairs: Vec::new(),
+            pairing: None,
             picking: None,
+            initial: Se3::identity(),
             // The command line's defaults, deliberately. The parameters two
             // front ends disagree about first are the ones nobody typed.
             prepare: PrepareParams::default(),
@@ -373,7 +396,24 @@ impl App {
         self.iterations
             .get(self.scrub)
             .map(|report| report.pose)
-            .unwrap_or_else(Se3::identity)
+            .unwrap_or(self.initial)
+    }
+
+    /// Solves for the motion between the picked pairs and starts there.
+    ///
+    /// Not a registration: a starting point for one. Three clicked pairs
+    /// are enough to put ICP in the right basin, which is the one thing
+    /// the conditioning report cannot check for itself.
+    fn align(&mut self) {
+        let (from, to): (Vec<_>, Vec<_>) = self.pairs.iter().copied().unzip();
+        let Some(pose) = rigidity_core::lie::absolute_orientation(&from, &to) else {
+            return;
+        };
+        self.initial = pose;
+        self.iterations.clear();
+        self.scrub = 0;
+        self.pairing = None;
+        self.request();
     }
 
     /// How far the demonstration moves the cloud, in metres.
@@ -531,19 +571,37 @@ impl App {
                     }
                 }
                 Event::Picked { id, at } => {
-                    if self.picking == Some(id) {
+                    if let Some((request, purpose)) = self.picking
+                        && request == id
+                    {
                         self.picking = None;
                         if let Some(at) = at {
-                            let origin = self.origin();
-                            let local = na::Vector3::new(at[0], at[1], at[2]) - origin;
-                            if self.measurement.len() >= 2 {
-                                self.measurement.clear();
+                            let at = na::Vector3::new(at[0], at[1], at[2]);
+                            match purpose {
+                                Purpose::Measure => {
+                                    let local = at - self.origin();
+                                    if self.measurement.len() >= 2 {
+                                        self.measurement.clear();
+                                    }
+                                    self.measurement.push(na::Point3::new(
+                                        local.x as f32,
+                                        local.y as f32,
+                                        local.z as f32,
+                                    ));
+                                }
+                                Purpose::Pair { on_source: true } => {
+                                    // Half a pair. The other half is the
+                                    // next click, on the other cloud.
+                                    self.pairs.push((at, at));
+                                    self.pairing = Some(false);
+                                }
+                                Purpose::Pair { on_source: false } => {
+                                    if let Some(pair) = self.pairs.last_mut() {
+                                        pair.1 = at;
+                                    }
+                                    self.pairing = Some(true);
+                                }
                             }
-                            self.measurement.push(na::Point3::new(
-                                local.x as f32,
-                                local.y as f32,
-                                local.z as f32,
-                            ));
                         }
                     }
                 }
@@ -854,7 +912,10 @@ impl App {
             commands.extend([Command::Fit, Command::Copy, Command::Clear]);
         }
         if self.source_id.is_some() {
-            commands.push(Command::Swap);
+            commands.extend([Command::Swap, Command::Align]);
+        }
+        if !self.pairs.is_empty() {
+            commands.push(Command::Unpair);
         }
         if self.selection.is_some() {
             commands.extend([Command::Keep, Command::Drop]);
@@ -886,6 +947,7 @@ impl App {
                 self.measuring_points = false;
                 self.measurement.clear();
                 self.lasso.clear();
+                self.pairing = None;
                 // Both lanes: one key, and the person pressing it means
                 // "stop", not "stop the one I was thinking of".
                 if matches!(self.work, Work::Running { .. }) || self.measuring.is_some() {
@@ -934,9 +996,24 @@ impl App {
                 self.measuring_points = !self.measuring_points;
                 self.measurement.clear();
             }
+            Command::Align => {
+                if self.pairs.len() >= 3 && self.pairing.is_none() {
+                    self.align();
+                } else {
+                    self.pairing = Some(true);
+                    self.measuring_points = false;
+                }
+            }
+            Command::Unpair => {
+                self.pairs.clear();
+                self.pairing = None;
+            }
             Command::Clear => {
                 self.selection = None;
                 self.lasso.clear();
+                self.pairs.clear();
+                self.pairing = None;
+                self.initial = Se3::identity();
                 self.entries.clear();
                 self.target_id = None;
                 self.source_id = None;
@@ -1112,6 +1189,20 @@ impl App {
         }
         // A measurement only gets the strip when nothing louder is
         // happening, which is most of the time: it is a second or two.
+        if let Some(on_source) = self.pairing {
+            return (
+                palette.accent,
+                format!(
+                    "{} · click the matching point on the {}   esc to stop",
+                    match self.pairs.len() {
+                        0 => "no pairs yet".to_owned(),
+                        1 => "1 pair".to_owned(),
+                        many => format!("{many} pairs"),
+                    },
+                    if on_source { "source" } else { "target" }
+                ),
+            );
+        }
         if self.measuring_points {
             return (
                 palette.accent,
@@ -1298,6 +1389,34 @@ impl App {
             ui.add_space(space::ROW);
         } else if self.selecting.is_some() {
             ui.label(RichText::new("selecting…").color(palette.faint).size(11.0));
+            ui.add_space(space::ROW);
+        }
+
+        if !self.pairs.is_empty() || self.pairing.is_some() {
+            let complete = self.pairs.len() - usize::from(self.pairing == Some(false));
+            ui.label(
+                RichText::new(format!(
+                    "{complete} matching {} picked",
+                    if complete == 1 { "pair" } else { "pairs" }
+                ))
+                .color(palette.text)
+                .size(11.0),
+            );
+            ui.horizontal(|ui| {
+                if complete >= 3 && quiet_button(ui, palette, "align", "and register from there") {
+                    self.run_command(Command::Align);
+                }
+                if quiet_button(ui, palette, "forget", "throw the pairs away") {
+                    self.run_command(Command::Unpair);
+                }
+            });
+            if complete < 3 {
+                ui.label(
+                    RichText::new("three pairs are the fewest that fix a motion")
+                        .color(palette.faint)
+                        .size(10.0),
+                );
+            }
             ui.add_space(space::ROW);
         }
 
@@ -1971,6 +2090,40 @@ impl App {
                 centred_note(ui, palette, rect, "drop to load");
             }
 
+            // The picked pairs: each end where its own cloud has it, and
+            // a line saying they are meant to be the same place.
+            if !self.pairs.is_empty() {
+                let shape = viewport_pixels(rect, ui.ctx().pixels_per_point());
+                let projection = self
+                    .camera
+                    .view_projection(shape[0] as f32 / shape[1].max(1) as f32);
+                let origin = self.origin();
+                let pose = self.pose();
+                let local = |at: na::Vector3<f64>| {
+                    let at = at - origin;
+                    na::Point3::new(at.x as f32, at.y as f32, at.z as f32)
+                };
+                for (index, (from, to)) in self.pairs.iter().enumerate() {
+                    let ends = [
+                        project(&projection, local(pose.transform_point(from)), rect),
+                        project(&projection, local(*to), rect),
+                    ];
+                    let [Some(a), Some(b)] = ends else { continue };
+                    ui.painter()
+                        .line_segment([a, b], Stroke::new(1.0, palette.medium));
+                    for (at, colour) in [(a, palette.point_moving), (b, palette.point)] {
+                        ui.painter().circle_filled(at, 3.5, colour);
+                    }
+                    ui.painter().text(
+                        a - Vec2::new(0.0, 9.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{}", index + 1),
+                        egui::FontId::monospace(10.0),
+                        palette.medium,
+                    );
+                }
+            }
+
             // The measurement, drawn where it was taken.
             if !self.measurement.is_empty() {
                 let shape = viewport_pixels(rect, ui.ctx().pixels_per_point());
@@ -2154,12 +2307,17 @@ impl App {
             self.finish_lasso(ui, rect);
         }
 
-        // Armed by ⌘K or M: a click asks the worker what is under it.
-        if self.measuring_points
-            && response.clicked()
+        // Armed by ⌘K, M or the pairing tool: a click asks the worker what
+        // is under it.
+        if response.clicked()
             && let Some(at) = response.interact_pointer_pos()
+            && let Some(purpose) = match (self.measuring_points, self.pairing) {
+                (_, Some(on_source)) => Some(Purpose::Pair { on_source }),
+                (true, None) => Some(Purpose::Measure),
+                _ => None,
+            }
         {
-            self.pick(ui, rect, at);
+            self.pick(ui, rect, at, purpose);
         }
 
         let delta = response.drag_delta();
@@ -2276,17 +2434,27 @@ impl App {
     }
 
     /// Asks what point is under a place on the screen.
-    fn pick(&mut self, ui: &egui::Ui, rect: Rect, at: egui::Pos2) {
-        let Some((held, matrix, size)) = self.aim(ui, rect) else {
+    fn pick(&mut self, ui: &egui::Ui, rect: Rect, at: egui::Pos2, purpose: Purpose) {
+        // A pairing click asks a named cloud; a measurement asks whichever
+        // one screen-space questions are about.
+        let entry = match purpose {
+            Purpose::Pair { on_source: true } => self.source_id,
+            Purpose::Pair { on_source: false } => self.target_id,
+            Purpose::Measure => None,
+        };
+        let Some((held, matrix, size)) = self.aim_at(ui, rect, entry) else {
             return;
         };
         let ppp = ui.ctx().pixels_per_point();
-        self.picking = Some(self.engine.pick(
-            held,
-            matrix,
-            [size[0] as f32, size[1] as f32],
-            [(at.x - rect.left()) * ppp, (at.y - rect.top()) * ppp],
-            self.section.slab(),
+        self.picking = Some((
+            self.engine.pick(
+                held,
+                matrix,
+                [size[0] as f32, size[1] as f32],
+                [(at.x - rect.left()) * ppp, (at.y - rect.top()) * ppp],
+                self.section.slab(),
+            ),
+            purpose,
         ));
     }
 
@@ -2295,11 +2463,19 @@ impl App {
     /// The one whose controls are open, or whatever is being registered
     /// onto. Asking every cloud at once would need an answer per cloud and
     /// a decision per answer.
-    fn aim(&self, ui: &egui::Ui, rect: Rect) -> Option<(Held, [f32; 16], [u32; 2])> {
-        let entry = self
-            .entry(self.selected)
-            .or_else(|| self.target())
-            .or_else(|| self.entries.first())?;
+    fn aim_at(
+        &self,
+        ui: &egui::Ui,
+        rect: Rect,
+        wanted: Option<u64>,
+    ) -> Option<(Held, [f32; 16], [u32; 2])> {
+        let entry = match wanted {
+            Some(id) => self.entry(Some(id))?,
+            None => self
+                .entry(self.selected)
+                .or_else(|| self.target())
+                .or_else(|| self.entries.first())?,
+        };
         let pose = if self.source_id == Some(entry.id) {
             self.pose()
         } else {

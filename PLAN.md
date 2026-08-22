@@ -31,7 +31,7 @@ without stage 2 has nowhere to put its scans.
 | W1 — Many clouds | **done** | scene list, roles as chips, one buffer per cloud |
 | W2 — Scalar fields | **done** | ramps, histogram, cloud-to-cloud distance |
 | W3 — Selection and geometry | **done** | lasso, cross-section, measure, subsample |
-| W4 — Manual alignment | not started | point-pair picking; the answer to a wrong basin |
+| W4 — Manual alignment | **done** | point pairs, Kabsch upstream, the wrong basin escaped |
 | W5 — Formats | not started | LAS/LAZ, E57, PCD, export |
 | **Stage 3 — the survey** | | |
 | S1 — Projects | not started | many scans with poses, saved and reopened |
@@ -899,17 +899,32 @@ neither a failure nor a drag. They are there now, added here. The lesson is
 not about the patch; it is that "I wrote it" and "it is in the binary" are
 different claims, and only the second one counts.
 
-**W4 — Manual alignment.** Pick three or more corresponding point pairs
-across two clouds; solve absolute orientation in closed form (Horn/Kabsch,
-the SVD of a 3×3 correlation matrix); use the result as the initial pose and
-run ICP from it. This is CloudCompare's most-used tool and it is also the
-honest answer to the failure mode the README documents — a wrong basin that
-no spectrum will flag, because conditioning describes the local shape of the
-cost function and says nothing about which minimum you are in.
-*Gate:* a demo pair displaced by 30°, far outside ICP's basin from the
-identity, converges to the true pose after three picked pairs — and fails to
-converge without them, which is the half of the test that proves the tool
-does something.
+**W4 — Manual alignment. Done.** Click matching points on the two clouds,
+three at least; the closed form gives the motion between them; the
+registration starts there instead of at the identity.
+*Gate: passed, both halves.* A corridor turned thirty degrees is out of
+reach from the identity and the test **requires ICP to fail** from there —
+a tool that rescues something never in danger has not been shown to do
+anything. Three pairs, picked a couple of centimetres off on each side
+because a person clicking a corner in two scans is imprecise, bring it to
+within 0.02 of the truth. A third assertion requires the solver to have
+*improved* on the clicks: if the picked pose were already the answer, the
+test would be measuring nothing.
+
+**The mathematics went upstream**, as §7.5 said it should. `rigidity-core::
+lie::absolute_orientation` is Horn/Kabsch — centre both sets, decompose
+their correlation, take the rotation — with six tests against analytical
+oracles: a known motion returns to twelve decimals, three pairs suffice and
+two do not, three points on a line return `None` rather than inventing the
+rotation about it that nothing determined, and a coplanar set does not come
+back mirrored. That last one is the case the determinant check exists for:
+without it the answer fits the points exactly and is the wrong motion.
+
+**What is tested and what is not.** The closed form, the registration from a
+given pose, and the two together are covered. The click-to-pair flow is not,
+because a click cannot be simulated from a shell — the same limit that let
+three M5 features ship missing. It is written, it compiles, and it wants a
+human to try it before it is believed.
 
 **W5 — Formats.** LAS/LAZ in and out, E57 (declared in the workspace
 dependencies and still unused), PCD, and export of any entry in the list.
