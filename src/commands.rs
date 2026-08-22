@@ -56,6 +56,14 @@ pub(crate) enum Command {
     Unpair,
     /// Write a cloud to disk.
     Export,
+    /// Keep the registration: move the source's own pose to where the
+    /// solver put it, so that it survives the next run and the next
+    /// session.
+    Place,
+    /// Write the scene — every scan, its pose and its role — to a project.
+    SaveProject,
+    /// Read one back.
+    OpenProject,
 }
 
 impl Command {
@@ -79,6 +87,9 @@ impl Command {
             Self::Align => "align by picking matching points".to_owned(),
             Self::Unpair => "forget the picked pairs".to_owned(),
             Self::Export => "save a cloud to a file…".to_owned(),
+            Self::Place => "place the source where the registration put it".to_owned(),
+            Self::SaveProject => "save the project…".to_owned(),
+            Self::OpenProject => "open a project…".to_owned(),
         }
     }
 
@@ -90,6 +101,7 @@ impl Command {
             Self::Cancel => "esc",
             Self::Fit => "F",
             Self::Measure => "M",
+            Self::SaveProject => "⌘S",
             _ => "",
         }
     }

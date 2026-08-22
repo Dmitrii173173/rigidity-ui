@@ -6,6 +6,7 @@ mod commands;
 mod engine;
 mod field;
 mod histogram;
+mod project;
 mod render;
 mod spectrum;
 mod theme;

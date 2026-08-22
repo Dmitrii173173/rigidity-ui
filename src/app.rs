@@ -6,6 +6,7 @@
 //! cloud makes it a registration. There is nothing a mode switch could tell
 //! the application that the scene does not already say.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ use crate::commands::{Command, Commands};
 use crate::engine::session::{Registration, Surface};
 use crate::engine::{Demo, Derivation, Engine, Event, Held, Step};
 use crate::field::{self, Field, Source};
+use crate::project::{self, Project};
 use crate::render::camera::Camera;
 use crate::render::{self, CloudDraw, ViewportCallback};
 use crate::theme::{self, Mode, Palette, space};
@@ -47,6 +49,15 @@ struct Entry {
     min: na::Vector3<f64>,
     max: na::Vector3<f64>,
     seconds: f64,
+    /// Where it sits: the motion carrying its own coordinates into the
+    /// survey frame.
+    ///
+    /// Stage two had one pose in the whole application, belonging to the
+    /// registration rather than to a cloud, because two clouds need only
+    /// one answer to "where is it". Twenty scans each need their own, and
+    /// a pose is the non-destructive way to hold it — the points are never
+    /// rewritten, so placing a scan costs a matrix and nothing else.
+    pose: Se3,
     /// Hidden entries keep their place, their colour and their buffers.
     visible: bool,
     /// The scalar it is currently coloured by, if any.
@@ -71,6 +82,33 @@ impl Entry {
         Held {
             cloud: Arc::clone(&self.cloud),
             generation: self.id,
+        }
+    }
+}
+
+/// What went wrong, in whichever vocabulary owns the answer.
+///
+/// The library's errors and the project format's are different kinds of
+/// fact — one is about points, the other about a line of text somebody may
+/// have edited — and flattening them into a string at the point they occur
+/// would throw away the only structure they have while it is still useful.
+enum Failure {
+    /// `rigidity` said so.
+    Pipeline(PipelineError),
+    /// The project file said so, or would not say anything at all.
+    Project {
+        /// The file that was being read.
+        path: PathBuf,
+        /// What was wrong with it.
+        problem: project::Error,
+    },
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pipeline(error) => write!(f, "{error}"),
+            Self::Project { path, problem } => write!(f, "{}: {problem}", path.display()),
         }
     }
 }
@@ -192,7 +230,13 @@ pub(crate) struct App {
     target_id: Option<u64>,
     source_id: Option<u64>,
     reading: Option<PathBuf>,
-    failure: Option<PipelineError>,
+    failure: Option<Failure>,
+    /// Scans whose files have been asked for but have not arrived.
+    ///
+    /// Opening a project is N reads through the same worker as everything
+    /// else, so the poses wait here and are matched to their clouds by
+    /// path as each one lands.
+    opening: Vec<project::Scan>,
     work: Work,
     /// A distance field being computed, and how far it has got.
     ///
@@ -284,6 +328,7 @@ impl App {
             source_id: None,
             reading: None,
             failure: None,
+            opening: Vec::new(),
             work: Work::Idle,
             measuring: None,
             outcome: Outcome::Nothing,
@@ -354,7 +399,7 @@ impl App {
         } else {
             (self.target_id, self.source_id) = (mine, theirs);
         }
-        self.iterations.clear();
+        self.rebase();
         self.outcome = Outcome::Nothing;
         self.request();
     }
@@ -379,11 +424,37 @@ impl App {
         let mut span: Option<(na::Vector3<f64>, na::Vector3<f64>)> = None;
         // What is on screen, not what is loaded: fitting to a cloud you
         // have hidden frames empty space.
+        //
+        // Posed, and each box re-boxed after the rotation rather than its
+        // two corners moved: a rotated box's corners are not the corners of
+        // the rotated box, and a camera fitted to the latter cuts the scan
+        // off at the diagonal.
         for entry in self.entries.iter().filter(|entry| entry.visible) {
-            span = Some(match span {
-                None => (entry.min, entry.max),
-                Some((min, max)) => (min.inf(&entry.min), max.sup(&entry.max)),
-            });
+            let placed = self.placement(entry);
+            for corner in 0..8 {
+                let at = na::Vector3::new(
+                    if corner & 1 == 0 {
+                        entry.min.x
+                    } else {
+                        entry.max.x
+                    },
+                    if corner & 2 == 0 {
+                        entry.min.y
+                    } else {
+                        entry.max.y
+                    },
+                    if corner & 4 == 0 {
+                        entry.min.z
+                    } else {
+                        entry.max.z
+                    },
+                );
+                let at = placed.transform_point(&at);
+                span = Some(match span {
+                    None => (at, at),
+                    Some((min, max)) => (min.inf(&at), max.sup(&at)),
+                });
+            }
         }
         let (min, max) = span?;
         let local = |v: na::Vector3<f64>| {
@@ -391,6 +462,43 @@ impl App {
             na::Point3::new(v.x as f32, v.y as f32, v.z as f32)
         };
         Some((local(min), local(max)))
+    }
+
+    /// Where a cloud is drawn, before the demonstration wobble.
+    ///
+    /// Every cloud sits at its own pose, except the source, which sits
+    /// where the registration currently being scrubbed puts it *relative to
+    /// the target*: the solver works between raw file coordinates, so its
+    /// answer has to be carried into the survey frame by the target's own
+    /// pose before it means anything.
+    ///
+    /// With no registration in flight the two agree, because [`App::rebase`]
+    /// keeps `initial` at the motion the current poses already describe.
+    /// That is what makes the survey its own starting guess.
+    fn placement(&self, entry: &Entry) -> Se3 {
+        if self.source_id == Some(entry.id) {
+            carried(self.target_pose(), self.pose())
+        } else {
+            entry.pose
+        }
+    }
+
+    /// Where the target sits, or the identity while there is no target.
+    fn target_pose(&self) -> Se3 {
+        self.target().map_or(Se3::identity(), |target| target.pose)
+    }
+
+    /// Points `initial` at the motion the current poses already describe.
+    ///
+    /// Called whenever a role or a pose changes. Without it, giving a scan
+    /// a pose and then pressing run would restart the solver from the
+    /// identity and throw away the placement that was the reason to open
+    /// the project at all.
+    fn rebase(&mut self) {
+        let source = self.source().map_or(Se3::identity(), |entry| entry.pose);
+        self.initial = between(self.target_pose(), source);
+        self.iterations.clear();
+        self.scrub = 0;
     }
 
     /// The pose the source is registered at — what the solver found, or
@@ -528,6 +636,16 @@ impl App {
                     seconds,
                 } => {
                     self.generation += 1;
+                    // A cloud arriving as part of a project brings its
+                    // pose and its role with it. Matched by path rather
+                    // than by arrival order: a read that fails sends no
+                    // `Loaded` at all, and a queue that assumes otherwise
+                    // puts every remaining pose on the wrong cloud.
+                    let planned = self
+                        .opening
+                        .iter()
+                        .position(|scan| scan.path == path)
+                        .map(|index| self.opening.remove(index));
                     let (min, max) = bounds.unwrap_or(([0.0; 3], [0.0; 3]));
                     let entry = Entry {
                         id: self.generation,
@@ -537,29 +655,49 @@ impl App {
                         min: min.into(),
                         max: max.into(),
                         seconds,
-                        visible: true,
+                        pose: planned.as_ref().map_or(Se3::identity(), |scan| scan.pose),
+                        visible: planned.as_ref().is_none_or(|scan| scan.visible),
                         field: None,
                         field_version: 0,
                         tint: self.entries.len(),
                     };
-                    // The first cloud is the one to register *against*,
-                    // which is also the one a single-cloud analysis asks
-                    // about. The second becomes what moves. A third is
-                    // context until someone says otherwise.
-                    if self.target_id.is_none() {
-                        self.target_id = Some(entry.id);
-                    } else if self.source_id.is_none() {
-                        self.source_id = Some(entry.id);
+                    match planned.as_ref().map(|scan| scan.role) {
+                        // A project says which two clouds were being
+                        // compared, and that answer outranks the guess
+                        // below — reopening twenty scans and having to
+                        // point at the same two again is the kind of
+                        // small forgetting that makes a format feel
+                        // unfinished.
+                        Some(project::Role::Target) => self.target_id = Some(entry.id),
+                        Some(project::Role::Source) => self.source_id = Some(entry.id),
+                        Some(project::Role::Idle) => {}
+                        // The first cloud is the one to register
+                        // *against*, which is also the one a single-cloud
+                        // analysis asks about. The second becomes what
+                        // moves. A third is context until someone says
+                        // otherwise.
+                        None => {
+                            if self.target_id.is_none() {
+                                self.target_id = Some(entry.id);
+                            } else if self.source_id.is_none() {
+                                self.source_id = Some(entry.id);
+                            }
+                        }
                     }
                     self.entries.push(entry);
-                    self.iterations.clear();
+                    self.rebase();
                     self.reading = None;
                     self.failure = None;
                     if let Some((min, max)) = self.bounds() {
                         self.camera.fit(min, max);
                         self.section.frame(min, max);
                     }
-                    self.request();
+                    // One analysis when the project has finished arriving,
+                    // not one per scan: twenty reports would be superseded
+                    // nineteen times, and the nineteen are not free.
+                    if self.opening.is_empty() {
+                        self.request();
+                    }
                 }
 
                 // Answers to questions that are no longer being asked are
@@ -680,7 +818,7 @@ impl App {
                     self.saved = Some((file_name(&path), seconds));
                 }
                 Event::Failed(error) => {
-                    self.failure = Some(error);
+                    self.failure = Some(Failure::Pipeline(error));
                     self.reading = None;
                     self.work = Work::Idle;
                 }
@@ -857,6 +995,8 @@ impl App {
                     input.key_pressed(Key::Escape),
                     input.key_pressed(Key::Space),
                     input.key_pressed(Key::M),
+                    input.modifiers.matches_logically(Modifiers::COMMAND)
+                        && input.key_pressed(Key::S),
                 ],
                 input
                     .raw
@@ -878,7 +1018,10 @@ impl App {
         // While the list is open the keyboard belongs to it: `f` is the
         // letter f, and escape closes the list rather than stopping a run.
         if !self.commands.is_open() {
-            let [open, fit, cancel, run, measure] = letters;
+            let [open, fit, cancel, run, measure, save] = letters;
+            if save {
+                self.run_command(Command::SaveProject);
+            }
             if measure {
                 self.run_command(Command::Measure);
             }
@@ -932,6 +1075,15 @@ impl App {
         if !self.entries.is_empty() {
             commands.extend([Command::Subsample, Command::Measure, Command::Export]);
         }
+        // Placing needs something to place: a registration that has run,
+        // and a source to write it onto.
+        if !self.iterations.is_empty() && self.source_id.is_some() {
+            commands.push(Command::Place);
+        }
+        if !self.entries.is_empty() {
+            commands.push(Command::SaveProject);
+        }
+        commands.push(Command::OpenProject);
         if matches!(self.outcome, Outcome::Registration { .. }) {
             commands.push(Command::Residuals);
         }
@@ -977,7 +1129,7 @@ impl App {
             }
             Command::Swap => {
                 std::mem::swap(&mut self.source_id, &mut self.target_id);
-                self.iterations.clear();
+                self.rebase();
                 self.request();
             }
             Command::Copy => self.clipboard = Some(self.command()),
@@ -1021,6 +1173,9 @@ impl App {
                 self.pairing = None;
             }
             Command::Export => self.export(),
+            Command::Place => self.place(),
+            Command::SaveProject => self.save_project(),
+            Command::OpenProject => self.open_project(),
             Command::Clear => {
                 self.selection = None;
                 self.lasso.clear();
@@ -1033,6 +1188,7 @@ impl App {
                 self.outcome = Outcome::Nothing;
                 self.iterations.clear();
                 self.failure = None;
+                self.opening.clear();
             }
         }
     }
@@ -2206,7 +2362,6 @@ impl App {
         let origin = self.origin();
         let demonstration = self.demonstration(time);
         let on_source = self.reporting_on_source();
-        let pose = self.pose();
         let (target_id, source_id) = (self.target_id, self.source_id);
 
         // The hovered direction's contribution outranks whatever a cloud
@@ -2228,10 +2383,11 @@ impl App {
             // The demonstration moves whichever cloud the report is about:
             // the moved source after a registration, the cloud itself when
             // a single one has been analysed.
+            let placed = self.placement(entry);
             let model = match (is_source, is_target, on_source) {
-                (true, _, _) => demonstration * pose,
-                (_, true, false) => demonstration,
-                _ => Se3::identity(),
+                (true, _, _) => demonstration * placed,
+                (_, true, false) => demonstration * placed,
+                _ => placed,
             };
             let reported = (is_source && on_source) || (is_target && !on_source);
             let colour = palette.cloud(entry.tint);
@@ -2393,6 +2549,25 @@ fn model_matrix(
     out
 }
 
+/// The solver's answer, carried into the survey frame.
+///
+/// A registration is a motion between two files' own coordinates. It says
+/// nothing about where either file belongs in a survey — that is the
+/// target's pose, and composing with it is what turns a pairwise answer
+/// into a placement.
+fn carried(target: Se3, registration: Se3) -> Se3 {
+    target * registration
+}
+
+/// The motion two placed scans already describe between them.
+///
+/// The inverse of [`carried`], and the reason a survey is its own starting
+/// guess: feeding this to the solver as `initial` starts it from where the
+/// scans have been put rather than from the identity.
+fn between(target: Se3, source: Se3) -> Se3 {
+    target.inverse() * source
+}
+
 /// Who holds a role after it is clicked on `id`.
 ///
 /// Two rules, and they are the whole of it: a cloud cannot hold both roles
@@ -2501,12 +2676,7 @@ impl App {
                 .or_else(|| self.target())
                 .or_else(|| self.entries.first())?,
         };
-        let pose = if self.source_id == Some(entry.id) {
-            self.pose()
-        } else {
-            Se3::identity()
-        };
-        let model = model_matrix(&pose, entry.cloud.origin(), self.origin());
+        let model = model_matrix(&self.placement(entry), entry.cloud.origin(), self.origin());
 
         let size = viewport_pixels(rect, ui.ctx().pixels_per_point());
         let aspect = size[0] as f32 / size[1].max(1) as f32;
@@ -2534,6 +2704,117 @@ impl App {
             return;
         };
         self.engine.save(entry.held(), path);
+    }
+
+    /// Keeps the registration by writing it onto the source's own pose.
+    ///
+    /// Nothing moves on screen, and that is the point: the cloud was
+    /// already being drawn there. What changes is what the position is
+    /// attributed to — a run that is still in the timeline and would be
+    /// thrown away by the next one, or the scan's own placement, which
+    /// survives a re-run, a role change and the file being closed.
+    ///
+    /// The solver works between raw file coordinates, so its answer is
+    /// carried into the survey frame by the target's pose before it is
+    /// kept. Registering against a scan that is itself misplaced therefore
+    /// inherits that error, which is honest: pairwise registration cannot
+    /// know better, and knowing better is what S2's pose graph is for.
+    fn place(&mut self) {
+        let Some(id) = self.source_id else {
+            return;
+        };
+        let landed = carried(self.target_pose(), self.pose());
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.pose = landed;
+        }
+        // Leaves `initial` describing exactly the placement just kept, so
+        // the next run starts where this one finished rather than at the
+        // identity.
+        self.rebase();
+    }
+
+    /// Writes the scene to a project file.
+    ///
+    /// What is written is each scan's *own* pose, not where it happens to
+    /// be drawn: the source may be sitting at an unplaced registration, or
+    /// at whatever iteration the timeline is scrubbed to, and saving
+    /// iteration seven of a run because a slider was left there is not a
+    /// thing a file should be able to do. An unplaced run is reported
+    /// rather than silently kept or silently dropped.
+    fn save_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("rigidity project", &[project::EXTENSION])
+            .set_file_name(format!("survey.{}", project::EXTENSION))
+            .save_file()
+        else {
+            return;
+        };
+
+        let scans: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.generated)
+            .map(|entry| project::Scan {
+                path: entry.path.clone(),
+                pose: entry.pose,
+                visible: entry.visible,
+                role: match (self.target_id, self.source_id) {
+                    (Some(id), _) if id == entry.id => project::Role::Target,
+                    (_, Some(id)) if id == entry.id => project::Role::Source,
+                    _ => project::Role::Idle,
+                },
+            })
+            .collect();
+        // A generated scene has no file to reference, so it cannot be in a
+        // project. Counted and said aloud rather than dropped quietly: a
+        // file that holds eighteen of the twenty clouds on screen and does
+        // not mention it is a file that lies by omission.
+        let generated = self.entries.len() - scans.len();
+        let written = scans.len();
+
+        let started = std::time::Instant::now();
+        match (Project { scans }).write(&path) {
+            Ok(()) => {
+                let mut note = format!(
+                    "{written} scan{} written",
+                    if written == 1 { "" } else { "s" }
+                );
+                if generated > 0 {
+                    note.push_str(&format!(
+                        " — {generated} generated cloud{} left out, having no file to name",
+                        if generated == 1 { "" } else { "s" }
+                    ));
+                }
+                if !self.iterations.is_empty() {
+                    note.push_str(" — the registration was not placed, so it is not in the file");
+                }
+                self.saved = Some((note, started.elapsed().as_secs_f64()));
+            }
+            Err(problem) => self.failure = Some(Failure::Project { path, problem }),
+        }
+    }
+
+    /// Reads a project back and asks for every cloud it names.
+    fn open_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("rigidity project", &[project::EXTENSION])
+            .pick_file()
+        else {
+            return;
+        };
+        match Project::read(&path) {
+            Ok(project) => {
+                self.run_command(Command::Clear);
+                for scan in &project.scans {
+                    self.engine.load(scan.path.clone());
+                }
+                self.opening = project.scans;
+            }
+            // The scene is left alone. A project that will not parse is a
+            // question about a file, and answering it by emptying the
+            // window loses whatever was open in order to say so.
+            Err(problem) => self.failure = Some(Failure::Project { path, problem }),
+        }
     }
 
     /// Makes a new cloud from the selection, or from the whole of one.
@@ -2718,7 +2999,65 @@ fn centred_note_below(ui: &egui::Ui, palette: &Palette, rect: Rect, text: &str) 
 
 #[cfg(test)]
 mod tests {
+    use rigidity_core::lie::So3;
+
     use super::*;
+
+    /// Two placed scans, and nothing on screen moves.
+    ///
+    /// This is the invariant the whole of S1 rests on: opening a project
+    /// puts poses on clouds, `rebase` turns those poses into the solver's
+    /// starting guess, and the source has to be drawn at exactly the pose
+    /// the file gave it — not near it. A survey whose scans shift the
+    /// moment it is opened cannot be used to measure anything.
+    #[test]
+    fn a_placed_scan_is_drawn_where_its_pose_says() {
+        let target = Se3::from_parts(
+            So3::exp(&na::Vector3::new(0.31, -0.12, 0.07)),
+            na::Vector3::new(512_345.678_9, 4_123_456.789_1, 231.5),
+        );
+        let source = Se3::from_parts(
+            So3::exp(&na::Vector3::new(-0.02, 0.44, 0.19)),
+            na::Vector3::new(512_351.234_5, 4_123_449.876_5, 232.75),
+        );
+
+        // What `rebase` computes, then what `placement` draws with it.
+        let drawn = carried(target, between(target, source));
+
+        let error = (drawn.matrix() - source.matrix()).abs().max();
+        assert!(
+            error < 1e-9,
+            "a scan moved by {error} m just by being opened"
+        );
+    }
+
+    /// And placing a registration leaves the cloud exactly where it was.
+    ///
+    /// Placing changes what a position is attributed to, not the position.
+    /// If the cloud jumps when the command runs, the composition is wrong
+    /// somewhere and the jump is the error it will keep making.
+    #[test]
+    fn placing_a_registration_moves_nothing() {
+        let target = Se3::from_parts(
+            So3::exp(&na::Vector3::new(0.05, 0.22, -0.4)),
+            na::Vector3::new(-4_321.5, 987.25, 12.125),
+        );
+        let solved = Se3::from_parts(
+            So3::exp(&na::Vector3::new(0.001, -0.002, 0.003)),
+            na::Vector3::new(0.031, -0.019, 0.004),
+        );
+
+        // Where the source is drawn during the run, and the pose `place`
+        // writes onto it.
+        let before = carried(target, solved);
+        let kept = carried(target, solved);
+        // After placing, `rebase` recomputes the starting guess and the
+        // source is drawn through it again.
+        let after = carried(target, between(target, kept));
+
+        let error = (after.matrix() - before.matrix()).abs().max();
+        assert!(error < 1e-9, "placing moved the cloud by {error} m");
+    }
 
     /// The role chips, without a window around them.
     #[test]
