@@ -17,7 +17,7 @@
 //! from zero is still good to about a nanometre — measured, in
 //! `the_world_alone_would_not_have_needed_moving`.
 //!
-//! The *information matrix* is the problem. `weighted_information` reports
+//! The *information matrix* is the problem. `calibrated_information` reports
 //! its directions about the coordinate origin, so a rotation of one
 //! milliradian carries four kilometres of translation with it, and the
 //! matrix comes back with a condition number of 1e18 where the same room at
@@ -39,7 +39,7 @@ use rigidity_core::lie::Se3;
 use rigidity_core::nalgebra as na;
 use rigidity_core::observability::{Conditioning, ObservabilityCriteria};
 use rigidity_graph::{
-    Diagnosis, Edge, GraphError, OptimiseParams, PoseGraph, Report, Shape, weighted_information,
+    Diagnosis, Edge, GraphError, OptimiseParams, PoseGraph, Report, Shape, calibrated_information,
 };
 
 /// A registration kept as an edge of the survey.
@@ -63,6 +63,14 @@ pub(crate) struct Link {
     pub(crate) determined: usize,
     /// The residual it was made at, metres.
     pub(crate) rmse: f64,
+    /// The median absolute residual it was made at, metres.
+    ///
+    /// Whether that registration was in the right place at all — the one
+    /// question the conditioning beside it cannot answer. `None` for an
+    /// edge read from a project written before this was recorded, and the
+    /// panel says "not recorded" rather than "fine", because an edge that
+    /// was never checked is not an edge that passed.
+    pub(crate) median_residual: Option<f64>,
 }
 
 impl Link {
@@ -72,6 +80,7 @@ impl Link {
         to: u64,
         measurement: Se3,
         rmse: f64,
+        median_residual: Option<f64>,
         conditioning: &Conditioning,
         criteria: &ObservabilityCriteria,
     ) -> Self {
@@ -80,13 +89,20 @@ impl Link {
             from,
             to,
             measurement,
-            information: weighted_information(conditioning, criteria),
+            // The tolerance is no longer part of this: `calibrated_information`
+            // stopped dropping directions on a threshold when S6 measured
+            // that doing so never once helped a real survey. What the edge
+            // carries now is `JᵀWJ` with the project's calibration in it.
+            // `determined` below is unchanged, because *saying* which
+            // directions are weak is the part that held up.
+            information: calibrated_information(conditioning, criteria.noise_sigma),
             determined: conditioning
                 .classify(criteria)
                 .iter()
                 .filter(|state| **state == Observability::High)
                 .count(),
             rmse,
+            median_residual,
         }
     }
 }
@@ -320,6 +336,7 @@ mod tests {
                     measurement: bias * (nodes[from].1.inverse() * nodes[to].1),
                     information,
                     determined: 6,
+                    median_residual: None,
                     rmse: 0.0,
                 }
             })
@@ -331,7 +348,7 @@ mod tests {
     ///
     /// The weight here is the shape a real one has: well-conditioned about
     /// the room it was measured in, and *expressed* about the coordinate
-    /// origin, which is where `weighted_information` puts it. At a UTM
+    /// origin, which is where `calibrated_information` puts it. At a UTM
     /// easting that is a matrix conditioning at 1e18, and solving with it as
     /// given rather than conjugated onto the survey moves the answer by
     /// centimetres.
@@ -424,6 +441,7 @@ mod tests {
             measurement: truth,
             information: na::Matrix6::identity(),
             determined: 6,
+            median_residual: None,
             rmse: 0.0,
         };
         let solved = solve(&nodes, &[link], 0, &origin, &OptimiseParams::default())
@@ -447,6 +465,7 @@ mod tests {
             measurement: Se3::identity(),
             information: na::Matrix6::identity(),
             determined: 6,
+            median_residual: None,
             rmse: 0.0,
         };
         assert!(

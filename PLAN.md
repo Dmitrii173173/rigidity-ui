@@ -35,14 +35,63 @@ without stage 2 has nowhere to put its scans.
 | W5 — Formats | **done** | LAS/LAZ, E57, PCD, export; one door for all of them |
 | **Stage 3 — the survey** | | |
 | S1 — Projects | **done** | poses bit-identical, parameters per scan, LOD decided and built |
-| S2 — Pose graph | **done** | `rigidity-graph` upstream, gate 120×; edges, solve, panel, viewport, saved with the project |
+| S2 — Pose graph | **done**, its gate retired | `rigidity-graph` upstream; edges, solve, panel, viewport, saved with the project. The 120× gate went with the weighting it measured — see S5–S6 upstream |
 | S3 — Loop closure | **done** | the manual path, and a panel that says when there is no closure |
 | S4 — Whole-survey view | **done** | per-edge settlement, per-station certainty, and the frame measured |
+| S5–S6 upstream | **measured, and negative** | the degeneracy weighting lost on every real survey; `calibrated_information` no longer thresholds |
+| S7 — Basins on screen | **done** | the median residual, measured upstream, now warns in the report and marks the survey edge |
 | **Upstream** | | |
 | §7 — first four changes | **done** | landed in `../rigidity`; CLI output unchanged |
 | §7 — items 5 and 6 | **done** | Kabsch landed with W4, E57 with W5 |
 | §7 — item 7 | **done** | `rigidity-graph`, and an `SE(3)` Jacobian in the core |
 | §7 — item 8 | not needed yet | serde; S1 shipped without it and the format is the better for it |
+
+---
+
+### S7 — The failure the report could not see, on screen
+
+Upstream S7 measured a detector for the one thing conditioning is blind to:
+a registration that converged to the wrong minimum. The rule is that at the
+right minimum half the residuals fall inside the sensor's noise, so the
+median absolute residual is the test, and it has no free parameter beyond
+the `σ` this application already asks for. Over four ETH ASL surveys — 228
+registrations, 64 in a wrong basin — it caught 62, missed two, and raised
+six false alarms in 164 sound ones.
+
+The viewer already had a rule of its own here: an RMSE past three times the
+stated noise draws the spectrum faint. That rule had never been measured
+against anything. It has been now, on the same 228 registrations: 59 of 64
+caught and **not one false alarm**. So it stays exactly where it was, and
+the new test joins it rather than replacing it — the precise rule keeps the
+verdict, and the sensitive one gets a line of text, which is what their
+measured error rates each earn.
+
+Three places changed, and one number now appears in all of them:
+
+- `Registration` carries `median_residual`, taken from
+  `rigidity_pipeline::median_absolute_residual` rather than from the
+  residuals the session already has. One extra pass is the price of the
+  viewer and the command line warning on the same number rather than on two
+  implementations of one median.
+- The report says "half the residuals are outside the sensor's noise" when
+  the average is fine and the median is not.
+- A survey edge carries it too, and a suspected edge takes the bullet and
+  the row from the determined count. Six directions determined by geometry
+  that was never under the other scan is six directions of nothing, and
+  which of the two the row should lead with is not a close call.
+
+The project file gained a `median` key without moving the format's version.
+A bump would make this build refuse every project already saved, which is
+the worse trade; a reader that finds no `median` line records that it found
+none, and the row says "basin unchecked" rather than showing nothing, since
+an edge that was never checked is not an edge that passed. Held by
+`an_edge_without_a_median_is_unchecked_rather_than_sound`.
+
+Checked on the real thing rather than compiled and hoped for: two ETH plain
+scans that are known to be a wrong-basin pair, through the screenshot
+harness. The row reads *wrong basin suspected · rmse 1.5e-1 m · median
+residual 7.4e-2 m, past the sensor's noise*, and 7.4e-2 is the same number
+`basin.rs` and `rigidity register` give for that pair.
 
 ---
 
@@ -994,6 +1043,25 @@ space either does not know that or cannot express it.
 viewer is how you see it; the mathematics belongs upstream in `rigidity`
 (§7), with its own tests and the same determinism guarantee as everything
 else there.
+
+**That claim did not survive being measured, and this is where that is
+recorded.** `rigidity`'s S5 and S6 ran it against theodolite ground truth on
+the two ETH ASL surveys: two scenes, five fields of view, six tolerances,
+sixty combinations, and the weighting either equalled `JᵀWJ` or lost to it
+by up to 3.4× — never once won. The reason is that an edge's six spreads sit
+inside one order of magnitude on real scans (`σ_min/σ_max` between 0.46 and
+0.039 over everything tried), so a threshold on them keeps all six or drops
+all six. `calibrated_information` upstream no longer thresholds; it carries
+the ×17 calibration and leaves out only a direction the geometry cannot see
+at all.
+
+What that costs this application is one sentence of ambition and nothing
+else. The pose graph still belongs here, the survey still solves, and the
+per-direction report — which directions of this edge are weak — is the part
+that held up and the part the viewer actually draws. `Edge::determined` and
+the S2–S4 panels are unchanged. What is gone is the promise that the viewer
+was silently making a better survey than everyone else's; it makes the same
+survey, and says more about it.
 
 **S1 — Projects.** Many scans, each with a pose and its own parameters;
 saved and reopened. The project file references clouds by path and stores

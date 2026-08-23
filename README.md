@@ -65,11 +65,23 @@ answer arrives unasked. A second makes it a registration.
 
 ## What it will not tell you
 
-Whether the solver found the *right* minimum. Conditioning describes the
-shape of the cost function around wherever it stopped; inside a wrong basin
-the surfaces agree just as tightly and the report looks just as confident.
-When the residual exceeds three times the sensor noise you stated, the
-spectrum is drawn faint and says so. Believe the residual first.
+Whether the solver found the *right* minimum — the conditioning cannot, and
+the residuals beside it can. Conditioning describes the shape of the cost
+function around wherever it stopped; inside a wrong basin the surfaces agree
+just as tightly and the spectrum looks just as confident.
+
+Two checks stand in front of it, and both have been measured against
+theodolite truth over four ETH ASL surveys — 228 registrations, 64 of them in
+a wrong basin. When the residual exceeds three times the sensor noise you
+stated, the spectrum is drawn faint and says so outright: that rule caught 59
+of the 64 and raised no false alarm at all. When the *median* residual is past
+the noise while the average is not, the report says so more quietly: three
+more caught, six false alarms in 164 sound registrations, which is worth a
+line of text and not worth dimming a report over. A survey edge whose median
+residual is past the noise is marked in its row, because a wrong edge does its
+damage to the whole survey rather than to itself.
+
+Believe the residuals first.
 
 ## Keys
 
@@ -200,7 +212,7 @@ One measurement decided how this is computed, and it is worth knowing about
 if you ever move it. A survey four million metres from zero has to be
 conjugated onto itself before the solve: not because the poses are large —
 every quantity the solve touches is a relative one, good to a nanometre —
-but because `weighted_information` refers its directions to the coordinate
+but because `calibrated_information` refers its directions to the coordinate
 origin, where a milliradian of rotation carries four kilometres of
 translation. The matrix conditions at 1e18 there against 1e2 at the survey,
 and solving without moving it puts the answer 58 m out on a 20 m loop.

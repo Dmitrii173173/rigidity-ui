@@ -117,6 +117,14 @@ pub(crate) struct EdgeRecord {
     pub(crate) determined: usize,
     /// The residual it was made at, metres.
     pub(crate) rmse: f64,
+    /// The median absolute residual it was made at, metres.
+    ///
+    /// `None` for a file written before this line existed. The key is added
+    /// without moving the format's version on purpose: a version bump would
+    /// make this build refuse every project already saved, which is a worse
+    /// trade than an older build refusing a file it has never seen. A
+    /// reader that finds no `median` line records that it found none.
+    pub(crate) median_residual: Option<f64>,
 }
 
 /// A scene, saved.
@@ -268,6 +276,9 @@ impl Project {
                 edge.determined,
                 number(edge.rmse)
             ));
+            if let Some(median) = edge.median_residual {
+                out.push_str(&format!("median  {}\n", number(median)));
+            }
         }
         out
     }
@@ -353,6 +364,7 @@ impl Project {
                     information: na::Matrix6::zeros(),
                     determined: 0,
                     rmse: 0.0,
+                    median_residual: None,
                 });
                 current = Record::Edge;
                 continue;
@@ -374,6 +386,12 @@ impl Project {
                             number,
                             problem: "rmse is one number, in metres",
                         })?
+                    }
+                    "median" => {
+                        edge.median_residual = Some(rest.parse().map_err(|_| Error::Line {
+                            number,
+                            problem: "median is one number, in metres",
+                        })?)
                     }
                     _ => {
                         return Err(Error::Line {
@@ -710,6 +728,7 @@ mod tests {
                 information,
                 determined: 5,
                 rmse: 1.234e-3,
+                median_residual: Some(4.56e-3),
             }],
         };
 
@@ -949,6 +968,31 @@ mod tests {
         }
 
         std::fs::remove_file(&file).ok();
+    }
+
+    /// An edge saved before the basin check existed comes back as
+    /// unchecked, not as sound.
+    ///
+    /// The `median` key was added without moving the format's version, so
+    /// this is the compatibility that has to hold: every project already on
+    /// disk still opens, and its edges say they were never checked rather
+    /// than defaulting to a number that would read as a pass.
+    #[test]
+    fn an_edge_without_a_median_is_unchecked_rather_than_sound() {
+        let text =
+            format!("{MAGIC} {VERSION}\nscan a.ply\nscan b.ply\nedge 0 1\nseen 6\nrmse 0.001\n");
+        let project = Project::parse(&text, Path::new("")).expect("an older project still opens");
+        let edge = project.edges.first().expect("one edge");
+        assert_eq!(edge.determined, 6);
+        assert_eq!(
+            edge.median_residual, None,
+            "an unchecked edge must not come back with a number"
+        );
+
+        // And one written now round-trips through the same reader.
+        let with = format!("{text}median 0.0042\n");
+        let project = Project::parse(&with, Path::new("")).expect("a newer project opens");
+        assert_eq!(project.edges[0].median_residual, Some(0.0042));
     }
 
     #[test]

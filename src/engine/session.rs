@@ -15,7 +15,7 @@ use rigidity_core::observability::Analysis;
 use rigidity_core::{NeighborSearch, nalgebra as na};
 use rigidity_pipeline::{
     PipelineError, PrepareParams, Prepared, Progress, RegisterParams, analyse_cloud,
-    analyse_registration, prepare_cloud_observed, register_pair_observed,
+    analyse_registration, median_absolute_residual, prepare_cloud_observed, register_pair_observed,
 };
 
 use rigidity_spatial::KdTree;
@@ -86,6 +86,17 @@ pub(crate) struct Registration {
     pub(crate) surface: Surface,
     /// How many points each side kept after downsampling.
     pub(crate) points: [usize; 2],
+    /// The median absolute residual at the pose found, metres.
+    ///
+    /// Whether this is the *right* minimum, which the analysis beside it
+    /// cannot say. `None` when nothing matched at all.
+    ///
+    /// Taken from `rigidity_pipeline` rather than from the residuals this
+    /// struct already carries, at the cost of one more pass: the numbers
+    /// the viewer warns on and the numbers the command line warns on have
+    /// to be the same numbers, and two implementations of one median are
+    /// two chances for them not to be.
+    pub(crate) median_residual: Option<f64>,
 }
 
 impl Session {
@@ -184,9 +195,12 @@ impl Session {
         let analysis = analyse_registration(moving, fixed, &result.pose, params)?;
         let (residuals, normals) = matched(moving, fixed, &result.pose, params);
 
+        let median_residual = median_absolute_residual(moving, fixed, &result.pose, params);
+
         Ok(Some(Registration {
             result,
             analysis,
+            median_residual,
             surface: Surface {
                 cloud: Arc::new(moving.cloud.clone()),
                 normals: Arc::new(normals),

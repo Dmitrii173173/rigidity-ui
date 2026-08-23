@@ -2923,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "rigidity-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "nalgebra",
  "rayon",
@@ -2932,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "rigidity-graph"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "rigidity-core",
  "thiserror 2.0.20",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "rigidity-io"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "e57",
  "las",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "rigidity-pipeline"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "rigidity-core",
  "rigidity-io",
@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "rigidity-scenes"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "nalgebra",
  "rigidity-core",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "rigidity-spatial"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "kiddo",
  "nalgebra",
