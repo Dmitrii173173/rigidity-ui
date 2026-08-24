@@ -1819,22 +1819,6 @@ impl App {
             ui.add_space(space::ROW);
         }
 
-        // Offered whenever there are two clouds and nothing has been
-        // picked, because that is exactly the case it is for: a pair opened
-        // on its own, where the timeline's pose is the identity and the
-        // identity is not a guess but the absence of one.
-        if self.source_id.is_some() && self.pairs.is_empty() && self.pairing.is_none() {
-            if quiet_button(
-                ui,
-                palette,
-                "find the alignment",
-                "try starting poses and keep the one whose residuals are the sensor's — seconds, not milliseconds",
-            ) {
-                self.run_command(Command::Search);
-            }
-            ui.add_space(space::TIGHT);
-        }
-
         if !self.pairs.is_empty() || self.pairing.is_some() {
             let complete = self.pairs.len() - usize::from(self.pairing == Some(false));
             ui.label(
@@ -2424,6 +2408,23 @@ impl App {
                 .color(palette.medium)
                 .size(11.0),
             );
+            ui.add_space(space::ROW);
+        }
+
+        // The remedy, offered where the complaint is made. A warning that a
+        // registration may be in the wrong basin is worth much less two
+        // hundred pixels away from the one control that can do something
+        // about it, and a person reading that line is by definition looking
+        // right here.
+        if !trusted || !self.residuals_are_the_sensors() {
+            if quiet_button(
+                ui,
+                palette,
+                "find the alignment",
+                "try starting poses and keep the one whose residuals are the sensor's — a second, not a millisecond",
+            ) {
+                self.run_command(Command::Search);
+            }
             ui.add_space(space::ROW);
         }
 
