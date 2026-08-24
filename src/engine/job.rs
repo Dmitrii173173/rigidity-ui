@@ -213,8 +213,14 @@ pub(crate) enum Job {
     },
     /// Write a cloud to disk, in whatever format the extension names.
     Save {
-        /// What to write.
-        from: Held,
+        /// What to write, each with the pose that places it.
+        ///
+        /// A list rather than one cloud, because the file a person wants
+        /// after a registration is usually both scans in one frame, and
+        /// because writing one is the same operation with one entry in it.
+        /// The poses are not decoration: a merge that concatenated raw
+        /// coordinates would produce a file that opens and is wrong.
+        placed: Vec<(Held, Se3)>,
         /// Where, and — by its extension — how.
         path: PathBuf,
     },

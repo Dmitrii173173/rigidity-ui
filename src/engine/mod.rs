@@ -142,8 +142,8 @@ impl Engine {
     }
 
     /// Queues a cloud to be written.
-    pub(crate) fn save(&self, from: Held, path: PathBuf) {
-        self.send(Job::Save { from, path });
+    pub(crate) fn save(&self, placed: Vec<(Held, Se3)>, path: PathBuf) {
+        self.send(Job::Save { placed, path });
     }
 
     /// Queues a new cloud made from an old one.
@@ -306,9 +306,14 @@ fn run(
             );
         }
 
-        Job::Save { from, path } => {
+        Job::Save { placed, path } => {
             let start = Instant::now();
-            let event = match rigidity_io::write(&from.cloud, &path) {
+            let borrowed: Vec<(&PointCloud, Se3)> = placed
+                .iter()
+                .map(|(held, pose)| (held.cloud.as_ref(), *pose))
+                .collect();
+            let cloud = rigidity_pipeline::merge(&borrowed);
+            let event = match rigidity_io::write(&cloud, &path) {
                 Ok(()) => Event::Saved {
                     path,
                     seconds: start.elapsed().as_secs_f64(),

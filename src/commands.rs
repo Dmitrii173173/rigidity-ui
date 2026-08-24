@@ -57,8 +57,10 @@ pub(crate) enum Command {
     Search,
     /// Throw the picked pairs away.
     Unpair,
-    /// Write a cloud to disk.
+    /// Write a cloud to disk, where it is drawn.
     Export,
+    /// Write every cloud on screen to disk as one, each where it is drawn.
+    ExportMerged,
     /// Keep the registration: move the source's own pose to where the
     /// solver put it, so that it survives the next run and the next
     /// session.
@@ -99,6 +101,7 @@ impl Command {
             Self::Search => "find the alignment without picking anything".to_owned(),
             Self::Unpair => "forget the picked pairs".to_owned(),
             Self::Export => "save a cloud to a file…".to_owned(),
+            Self::ExportMerged => "save everything shown as one cloud…".to_owned(),
             Self::Place => "place the source where the registration put it".to_owned(),
             Self::SaveProject => "save the project…".to_owned(),
             Self::OpenProject => "open a project…".to_owned(),

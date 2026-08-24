@@ -1224,6 +1224,11 @@ impl App {
         if !self.entries.is_empty() {
             commands.extend([Command::Subsample, Command::Measure, Command::Export]);
         }
+        // Two clouds are what makes a merge a merge; one is what `Export`
+        // already writes.
+        if self.entries.iter().filter(|entry| entry.visible).count() > 1 {
+            commands.push(Command::ExportMerged);
+        }
         // Placing needs something to place: a registration that has run,
         // and a source to write it onto.
         if !self.iterations.is_empty() && self.source_id.is_some() {
@@ -1348,6 +1353,7 @@ impl App {
                 self.pairing = None;
             }
             Command::Export => self.export(),
+            Command::ExportMerged => self.export_merged(),
             Command::Place => self.place(),
             Command::Link => self.link(),
             Command::Unlink => {
@@ -3308,7 +3314,45 @@ impl App {
         else {
             return;
         };
-        self.engine.save(entry.held(), path);
+        // Where it is drawn, not where its file happened to put it. Saving
+        // a scan that has just been registered and getting the unregistered
+        // coordinates back is a way to lose an afternoon's work without
+        // being told.
+        self.engine
+            .save(vec![(entry.held(), self.placement(entry))], path);
+    }
+
+    /// Every cloud on screen, in one file, each where it is drawn.
+    ///
+    /// The thing a registration is *for*: the answer to "where does the
+    /// second scan go" is only useful once something else can open it.
+    /// Hidden clouds are left out — the list is what is being looked at,
+    /// and a scan switched off is a scan the person has decided against.
+    ///
+    /// The poses come from [`placement`](Self::placement), which is the
+    /// same function the viewport builds its model matrices from. That is
+    /// the whole guarantee this feature needs and the reason there is no
+    /// second answer to keep in step: a file that disagreed with the screen
+    /// would be discovered by somebody else, in another program, a week
+    /// later.
+    fn export_merged(&self) {
+        let placed: Vec<(Held, Se3)> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.visible)
+            .map(|entry| (entry.held(), self.placement(entry)))
+            .collect();
+        if placed.is_empty() {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("point cloud", rigidity_io::WRITABLE)
+            .set_file_name("merged.ply")
+            .save_file()
+        else {
+            return;
+        };
+        self.engine.save(placed, path);
     }
 
     /// Keeps the registration by writing it onto the source's own pose.
