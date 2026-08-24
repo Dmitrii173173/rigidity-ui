@@ -1424,6 +1424,28 @@ impl App {
             .is_none_or(|rmse| rmse <= WRONG_BASIN_FACTOR * self.report.noise)
     }
 
+    /// The reference lines a field's histogram is worth reading against.
+    ///
+    /// Only the residual field gets any, and only after a registration: on
+    /// a height field or a raw file attribute there is no threshold this
+    /// application has an opinion about, and inventing one would teach
+    /// people to read meaning into a line that has none.
+    ///
+    /// The two it does draw are the whole rule made visible. σ is where the
+    /// sensor's noise falls; the median is where half the residuals fell.
+    /// Median left of σ is a registration to believe, median right of it is
+    /// not — the same verdict the words above the histogram give, in a form
+    /// that also shows *how* close it was, which no sentence does. Both
+    /// numbers are already computed: neither costs a pass over the points.
+    fn marks_for(&self, field: &field::Field, palette: &Palette) -> Vec<histogram::Mark> {
+        marks(
+            &field.source,
+            self.report.noise,
+            self.median_residual(),
+            palette,
+        )
+    }
+
     /// Whether the residuals that remain are the sensor's own.
     ///
     /// The more sensitive half of the same question. At the right minimum
@@ -1982,7 +2004,9 @@ impl App {
                 });
                 if let Some(field) = &entry.field {
                     ui.add_space(space::TIGHT);
-                    if let Some(clamp) = histogram::show(ui, palette, field, palette.faint, colour)
+                    let marks = self.marks_for(field, palette);
+                    if let Some(clamp) =
+                        histogram::show(ui, palette, field, palette.faint, colour, &marks)
                     {
                         clamped = Some((entry.id, clamp));
                     }
@@ -3786,6 +3810,38 @@ fn heading(ui: &mut egui::Ui, palette: &Palette, text: &str) {
 }
 
 /// A button with no frame until it is wanted.
+/// Which reference lines a field's histogram gets. See [`App::marks_for`].
+fn marks(
+    source: &field::Source,
+    noise: f64,
+    median: Option<f64>,
+    palette: &Palette,
+) -> Vec<histogram::Mark> {
+    if *source != field::Source::Residual {
+        return Vec::new();
+    }
+    let mut marks = vec![histogram::Mark {
+        at: noise as f32,
+        label: "σ",
+        colour: palette.muted,
+    }];
+    // Absent until something has been registered, and then it is the number
+    // the command line and the survey panel warn on — not a second median
+    // computed here, which could disagree with them.
+    if let Some(median) = median {
+        marks.push(histogram::Mark {
+            at: median as f32,
+            label: "med",
+            colour: if median <= noise {
+                palette.high
+            } else {
+                palette.low
+            },
+        });
+    }
+    marks
+}
+
 fn quiet_button(ui: &mut egui::Ui, palette: &Palette, text: &str, hint: &str) -> bool {
     ui.add(
         egui::Button::new(RichText::new(text).size(11.0).color(palette.muted))
@@ -3944,6 +4000,37 @@ mod tests {
     }
 
     /// The role chips, without a window around them.
+    /// The histogram's reference lines say the same thing as the words
+    /// above it, and only where they mean something.
+    ///
+    /// The colour is the assertion that matters. A median mark drawn in the
+    /// colour of a determined direction, on a registration whose median is
+    /// past the sensor's noise, would be a picture contradicting the
+    /// sentence beside it — and a person believes the picture.
+    #[test]
+    fn the_histogram_marks_carry_the_same_verdict_as_the_words() {
+        let palette = theme::Palette::of(theme::Mode::Dark);
+
+        assert!(
+            marks(&field::Source::Height, 0.03, Some(0.007), &palette).is_empty(),
+            "a height field was given a threshold this application has no opinion about"
+        );
+
+        // Registered, and inside the noise.
+        let sound = marks(&field::Source::Residual, 0.03, Some(0.007), &palette);
+        assert_eq!(sound.len(), 2);
+        assert_eq!(sound[0].label, "σ");
+        assert_eq!(sound[1].colour, palette.high);
+
+        // Registered, and past it.
+        let suspect = marks(&field::Source::Residual, 0.03, Some(0.064), &palette);
+        assert_eq!(suspect[1].colour, palette.low);
+
+        // Not registered: σ still means something, a median does not exist.
+        let alone = marks(&field::Source::Residual, 0.03, None, &palette);
+        assert_eq!(alone.len(), 1);
+    }
+
     #[test]
     fn a_cloud_holds_at_most_one_role() {
         // Taking a free role.

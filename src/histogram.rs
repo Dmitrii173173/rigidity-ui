@@ -9,6 +9,11 @@
 //!
 //! The handles move the ramp. They never touch the values, and the bars
 //! never move: the histogram is of the data.
+//!
+//! A caller may also ask for reference lines through the bars — see
+//! [`Mark`]. On a residual field those are the sensor's noise and the
+//! median, which turns the rule the whole application rests on into
+//! something you look at rather than something you are told.
 
 use eframe::egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, Vec2, pos2};
 
@@ -19,6 +24,27 @@ use crate::theme::Palette;
 const BARS: f32 = 34.0;
 /// Height of the strip of numbers under them.
 const AXIS: f32 = 12.0;
+/// Height of the strip of mark labels above them.
+const MARKS: f32 = 11.0;
+
+/// A reference line through the bars, with a name.
+///
+/// Not a handle: it moves nothing and is not draggable. It is a value the
+/// distribution should be read *against* — where the sensor's noise falls,
+/// where the median fell — so that a verdict stated in words above has a
+/// picture under it.
+///
+/// A value outside the field's range pins to the near edge, which reads
+/// correctly on its own: a σ pinned right means every residual is inside
+/// the noise.
+pub(crate) struct Mark {
+    /// Where, in the field's own units.
+    pub(crate) at: f32,
+    /// Two or three characters. There is room for no more.
+    pub(crate) label: &'static str,
+    /// Marks carry verdicts, so they carry their own colour.
+    pub(crate) colour: Color32,
+}
 
 /// Draws the histogram and returns a new clamp if a handle was dragged.
 pub(crate) fn show(
@@ -27,13 +53,18 @@ pub(crate) fn show(
     field: &Field,
     cold: Color32,
     hot: Color32,
+    marks: &[Mark],
 ) -> Option<[f32; 2]> {
+    let above = if marks.is_empty() { 0.0 } else { MARKS };
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), BARS + AXIS),
+        Vec2::new(ui.available_width(), above + BARS + AXIS),
         Sense::click_and_drag(),
     );
     let painter = ui.painter();
-    let plot = Rect::from_min_max(rect.left_top(), pos2(rect.right(), rect.top() + BARS));
+    let plot = Rect::from_min_max(
+        pos2(rect.left(), rect.top() + above),
+        pos2(rect.right(), rect.top() + above + BARS),
+    );
 
     // Counts go up as their square root. One bin usually holds most of a
     // real field — the floor of a room, the near-zero of a good
@@ -71,6 +102,28 @@ pub(crate) fn show(
             format!("{value:.3}"),
             FontId::monospace(9.0),
             palette.muted,
+        );
+    }
+
+    // After the handles, so that where the two coincide the reference line
+    // is the one left visible: a handle can be dragged back out, and a σ
+    // cannot be recovered by looking.
+    for mark in marks {
+        let x = plot.left() + plot.width() * field.position(mark.at);
+        // Dashed, so that it reads as an annotation rather than as data and
+        // cannot be mistaken for a bar.
+        let mut y = plot.top();
+        while y < plot.bottom() {
+            let to = (y + 3.0).min(plot.bottom());
+            painter.line_segment([pos2(x, y), pos2(x, to)], Stroke::new(1.0, mark.colour));
+            y += 6.0;
+        }
+        painter.text(
+            pos2(x, rect.top()),
+            Align2::CENTER_TOP,
+            mark.label,
+            FontId::monospace(9.0),
+            mark.colour,
         );
     }
 
