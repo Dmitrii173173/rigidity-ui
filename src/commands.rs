@@ -52,6 +52,9 @@ pub(crate) enum Command {
     /// Pick matching points on the two clouds and solve for the motion
     /// between them.
     Align,
+    /// Register without being told where to start: lay out starting poses,
+    /// try them all, and keep the one whose median residual is smallest.
+    Search,
     /// Throw the picked pairs away.
     Unpair,
     /// Write a cloud to disk.
@@ -93,6 +96,7 @@ impl Command {
             Self::Subsample => "subsample at the voxel size".to_owned(),
             Self::Measure => "measure between two points".to_owned(),
             Self::Align => "align by picking matching points".to_owned(),
+            Self::Search => "find the alignment without picking anything".to_owned(),
             Self::Unpair => "forget the picked pairs".to_owned(),
             Self::Export => "save a cloud to a file…".to_owned(),
             Self::Place => "place the source where the registration put it".to_owned(),

@@ -24,7 +24,7 @@ use rigidity_pipeline::{PipelineError, PrepareParams, RegisterParams, ReportPara
 use crate::bench::Bench;
 use crate::commands::{Command, Commands};
 use crate::engine::session::{Registration, Surface};
-use crate::engine::{Demo, Derivation, Engine, Event, Held, Step};
+use crate::engine::{Demo, Derivation, Engine, Event, Held, Start, Step};
 use crate::field::{self, Field, Source};
 use crate::project::{self, Project};
 use crate::render::camera::Camera;
@@ -991,11 +991,23 @@ impl App {
     /// back to a plausible iteration and running again from there needs no
     /// separate control.
     fn request(&mut self) {
+        let start = Start::At(self.pose());
+        self.request_from(start);
+    }
+
+    /// The same, but without telling it where to begin.
+    ///
+    /// For the pair opened on its own, where the timeline's pose is the
+    /// identity and the identity means nothing.
+    fn search(&mut self) {
+        self.request_from(Start::Search);
+    }
+
+    fn request_from(&mut self, start: Start) {
         let id = match (self.source(), self.target()) {
             (Some(source), Some(target)) => {
                 let (source_prepare, target_prepare) = (source.prepare, target.prepare);
                 let (source, target) = (source.held(), target.held());
-                let initial = self.pose();
                 self.iterations.clear();
                 self.scrub = 0;
                 self.engine.register(
@@ -1004,7 +1016,7 @@ impl App {
                     source_prepare,
                     target_prepare,
                     self.registration,
-                    initial,
+                    start,
                 )
             }
             (None, Some(target)) => {
@@ -1201,7 +1213,7 @@ impl App {
             commands.extend([Command::Fit, Command::Copy, Command::Clear]);
         }
         if self.source_id.is_some() {
-            commands.extend([Command::Swap, Command::Align]);
+            commands.extend([Command::Swap, Command::Align, Command::Search]);
         }
         if !self.pairs.is_empty() {
             commands.push(Command::Unpair);
@@ -1324,6 +1336,12 @@ impl App {
                     self.pairing = Some(true);
                     self.measuring_points = false;
                 }
+            }
+            Command::Search => {
+                self.pairing = None;
+                self.measuring_points = false;
+                self.scrub = 0;
+                self.search();
             }
             Command::Unpair => {
                 self.pairs.clear();
@@ -1793,6 +1811,22 @@ impl App {
         } else if self.selecting.is_some() {
             ui.label(RichText::new("selecting…").color(palette.faint).size(11.0));
             ui.add_space(space::ROW);
+        }
+
+        // Offered whenever there are two clouds and nothing has been
+        // picked, because that is exactly the case it is for: a pair opened
+        // on its own, where the timeline's pose is the identity and the
+        // identity is not a guess but the absence of one.
+        if self.source_id.is_some() && self.pairs.is_empty() && self.pairing.is_none() {
+            if quiet_button(
+                ui,
+                palette,
+                "find the alignment",
+                "try starting poses and keep the one whose residuals are the sensor's — seconds, not milliseconds",
+            ) {
+                self.run_command(Command::Search);
+            }
+            ui.add_space(space::TIGHT);
         }
 
         if !self.pairs.is_empty() || self.pairing.is_some() {

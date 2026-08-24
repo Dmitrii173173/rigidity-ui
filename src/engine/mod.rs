@@ -25,7 +25,7 @@ use rigidity_scenes::{Scene, SceneKind, SceneParams};
 pub(crate) mod job;
 pub(crate) mod session;
 
-pub(crate) use job::{Demo, Derivation, Event, Held, Job, Lane, Step};
+pub(crate) use job::{Demo, Derivation, Event, Held, Job, Lane, Start, Step};
 use session::Session;
 
 /// A handle to the worker thread.
@@ -167,7 +167,7 @@ impl Engine {
         source_prepare: PrepareParams,
         target_prepare: PrepareParams,
         params: RegisterParams,
-        initial: Se3,
+        start: Start,
     ) -> u64 {
         let id = self.issue(Lane::Report);
         self.send(Job::Register {
@@ -177,7 +177,7 @@ impl Engine {
             source_prepare,
             target_prepare,
             params,
-            initial,
+            start,
         });
         id
     }
@@ -392,9 +392,9 @@ fn run(
             source_prepare,
             target_prepare,
             params,
-            initial,
+            start,
         } => {
-            let start = Instant::now();
+            let began = Instant::now();
             let stale = || wanted[Lane::Report.index()].load(Ordering::Relaxed) != id;
             let mut progress = |progress: Progress| {
                 emit(
@@ -427,7 +427,7 @@ fn run(
                 &source_prepare,
                 &target_prepare,
                 &params,
-                initial,
+                start,
                 &stale,
                 &mut progress,
                 &mut iteration,
@@ -435,7 +435,7 @@ fn run(
                 Ok(Some(outcome)) => Event::Registered {
                     id,
                     outcome: Box::new(outcome),
-                    seconds: start.elapsed().as_secs_f64(),
+                    seconds: began.elapsed().as_secs_f64(),
                 },
                 Ok(None) => Event::Abandoned { id },
                 Err(error) => Event::Failed(error),

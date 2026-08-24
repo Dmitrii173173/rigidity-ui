@@ -14,13 +14,14 @@ use rigidity_core::lie::Se3;
 use rigidity_core::observability::Analysis;
 use rigidity_core::{NeighborSearch, nalgebra as na};
 use rigidity_pipeline::{
-    PipelineError, PrepareParams, Prepared, Progress, RegisterParams, analyse_cloud,
-    analyse_registration, median_absolute_residual, prepare_cloud_observed, register_pair_observed,
+    PipelineError, PrepareParams, Prepared, Progress, RegisterParams, SearchParams, Stage,
+    analyse_cloud, analyse_registration, median_absolute_residual, prepare_cloud_observed,
+    register_globally_observed, register_pair_observed,
 };
 
 use rigidity_spatial::KdTree;
 
-use super::job::{Derivation, Held};
+use super::job::{Derivation, Held, Start};
 
 /// How many points are measured between two progress reports.
 const DISTANCE_CHUNK: usize = 8_192;
@@ -156,8 +157,8 @@ impl Session {
         source_prepare: &PrepareParams,
         target_prepare: &PrepareParams,
         params: &RegisterParams,
-        initial: Se3,
-        stale: &dyn Fn() -> bool,
+        start: Start,
+        stale: &(dyn Fn() -> bool + Sync),
         progress: &mut dyn FnMut(Progress),
         iteration: &mut dyn FnMut(&IterationReport),
     ) -> Result<Option<Registration>, PipelineError> {
@@ -179,6 +180,50 @@ impl Session {
 
         let moving = &self.source.as_ref().expect("just prepared").prepared;
         let fixed = &self.target.as_ref().expect("just prepared").prepared;
+
+        // Where to begin. A search is a separate pass over the pair, and a
+        // deliberately coarse one; what it hands back is a starting pose,
+        // which then goes through the very same registration as any other.
+        // Nothing downstream — the timeline, the report, the warning — can
+        // tell how the starting pose was arrived at, and none of them
+        // should.
+        let initial = match start {
+            Start::At(pose) => pose,
+            Start::Search => {
+                // Said once, before the search rather than during it. The
+                // screening runs on every core at once, and its observer is
+                // therefore called from all of them, while the channel this
+                // progress goes down belongs to this thread. A second of
+                // work does not justify making the whole progress path
+                // thread-safe; abandoning the search does, and that is what
+                // the observer is used for.
+                progress(Progress {
+                    stage: Stage::Searching,
+                    done: 0,
+                    total: 1,
+                });
+                let searched = register_globally_observed(
+                    moving,
+                    fixed,
+                    params,
+                    &SearchParams::default(),
+                    |_, _| {
+                        if stale() {
+                            ControlFlow::Break(())
+                        } else {
+                            ControlFlow::Continue(())
+                        }
+                    },
+                );
+                if stale() {
+                    return Ok(None);
+                }
+                match searched {
+                    Some(found) => found.result.pose,
+                    None => return Err(PipelineError::NoCorrespondences),
+                }
+            }
+        };
 
         let result = register_pair_observed(moving, fixed, initial, params, |report| {
             iteration(report);
@@ -627,7 +672,7 @@ mod tests {
                 &prepare,
                 &prepare,
                 &params,
-                Se3::identity(),
+                Start::At(Se3::identity()),
                 &|| false,
                 &mut |_| {},
                 &mut |_| {},
@@ -919,7 +964,7 @@ mod tests {
                 &prepare,
                 &prepare,
                 &params,
-                Se3::identity(),
+                Start::At(Se3::identity()),
                 &|| false,
                 &mut |_| {},
                 &mut |_| {},
@@ -956,7 +1001,7 @@ mod tests {
                 &prepare,
                 &prepare,
                 &params,
-                start,
+                Start::At(start),
                 &|| false,
                 &mut |_| {},
                 &mut |_| {},
@@ -987,6 +1032,82 @@ mod tests {
     /// Each side is prepared with its own voxel, and both reach the solver.
     ///
     /// The whole of the per-scan parameter change is that two numbers
+    /// Asking the session to search must not quietly start from the
+    /// identity.
+    ///
+    /// The two ways of starting go down the same call and end in the same
+    /// `Registration`, and nothing in the result records which was used —
+    /// deliberately, so that the report cannot come to depend on it. That
+    /// leaves nobody to notice if the search were dropped on the way, so it
+    /// is noticed here: a welded tee turned fifty degrees. From the
+    /// identity ICP comes back thirty-two degrees out; the search comes
+    /// back on it.
+    #[test]
+    fn searching_reaches_a_pose_the_identity_does_not() {
+        let scene = Scene::generate(
+            SceneKind::TeeJoint,
+            SceneParams {
+                points_per_face: 20_000,
+                noise_sigma: 0.002,
+                ..SceneParams::default()
+            },
+        );
+        let turn = Se3::exp(&na::Vector6::new(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            50f64.to_radians(),
+        ));
+        let moved = transform_cloud(&scene.cloud, &turn.inverse());
+
+        let held = |cloud: PointCloud, generation: u64| Held {
+            cloud: Arc::new(cloud),
+            generation,
+        };
+        let source = held(moved, 1);
+        let target = held(scene.cloud.clone(), 2);
+        let prepare = PrepareParams::default();
+        let params = RegisterParams::default();
+
+        let run = |start: Start| {
+            Session::default()
+                .register(
+                    &source,
+                    &target,
+                    &prepare,
+                    &prepare,
+                    &params,
+                    start,
+                    &|| false,
+                    &mut |_| {},
+                    &mut |_| {},
+                )
+                .expect("the registration failed")
+                .expect("the registration was abandoned")
+        };
+        let off = |found: &Registration| {
+            (found.result.pose.rotation().log() - turn.rotation().log()).norm()
+        };
+
+        let cold = run(Start::At(Se3::identity()));
+        assert!(
+            off(&cold) > 0.10,
+            "the identity already recovered the turn, to {} rad — this scene no longer \
+             tests anything",
+            off(&cold)
+        );
+
+        let searched = run(Start::Search);
+        assert!(
+            off(&searched) < 0.02,
+            "the search came back {} rad from the turn, which is where the identity \
+             would have left it",
+            off(&searched)
+        );
+    }
+
     /// travel where one did. Nothing about the pose or the residual would
     /// notice if the second were dropped on the way and the first used for
     /// both — the run would converge and look right — so what is asserted
@@ -1016,7 +1137,7 @@ mod tests {
                     &source_prepare,
                     &target_prepare,
                     &RegisterParams::default(),
-                    Se3::identity(),
+                    Start::At(Se3::identity()),
                     &|| false,
                     &mut |_| {},
                     &mut |_| {},

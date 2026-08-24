@@ -250,8 +250,24 @@ pub(crate) enum Job {
         /// How to register them.
         params: RegisterParams,
         /// Where to start from.
-        initial: Se3,
+        start: Start,
     },
+}
+
+/// Where a registration begins.
+///
+/// Not an `Option<Se3>`: the identity is a perfectly good pose to start
+/// from and means "begin here", while searching means "I do not know". An
+/// option would spell both of those the same way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Start {
+    /// Begin at this pose. What every registration did before the search
+    /// existed, and still the right thing whenever anything is known: the
+    /// previous leg of a survey, a manual alignment, the identity.
+    At(Se3),
+    /// Do not assume one — lay out starts and keep the candidate whose
+    /// median residual is smallest.
+    Search,
 }
 
 /// What the engine reports back.
