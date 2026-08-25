@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align, Color32, Key, Layout, Modifiers, PointerButton, Rect, RichText, Sense, Stroke,
-    Vec2, pos2,
+    self, Align, Color32, CursorIcon, Key, Layout, Modifiers, PointerButton, Rect, RichText, Sense,
+    Stroke, Vec2, pos2,
 };
 use rigidity_core::PointCloud;
 use rigidity_core::icp::IterationReport;
@@ -1891,7 +1891,14 @@ impl App {
                     if shown { colour } else { Color32::TRANSPARENT },
                     Stroke::new(1.0, if shown { colour } else { palette.faint }),
                 );
-                if response.on_hover_text("show or hide").clicked() {
+                // The dot keeps its fill as state rather than as chrome —
+                // filled is shown, hollow is hidden — so the pointer is what
+                // says it can be clicked at all.
+                if response
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("show or hide")
+                    .clicked()
+                {
                     toggled = Some(entry.id);
                 }
 
@@ -1909,8 +1916,9 @@ impl App {
                                 })
                                 .size(12.0),
                         )
-                        .fill(Color32::TRANSPARENT),
+                        .fill(palette.raised),
                     )
+                    .on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text("colour it by something")
                     .clicked()
                 {
@@ -1938,7 +1946,7 @@ impl App {
                             .fill(if held {
                                 palette.line
                             } else {
-                                Color32::TRANSPARENT
+                                palette.raised
                             }),
                         );
                         if response.on_hover_text(hint).clicked() {
@@ -1994,7 +2002,7 @@ impl App {
                             .fill(if held {
                                 palette.line
                             } else {
-                                Color32::TRANSPARENT
+                                palette.raised
                             }),
                         );
                         if response.clicked() {
@@ -2113,7 +2121,7 @@ impl App {
                         .fill(if held {
                             palette.line
                         } else {
-                            Color32::TRANSPARENT
+                            palette.raised
                         }),
                     )
                     .clicked()
@@ -3842,11 +3850,26 @@ fn marks(
     marks
 }
 
+/// A control that reads as one at rest.
+///
+/// It used to be transparent text in the muted colour, which is exactly how
+/// this application draws a label. On a panel with twenty rows that is not
+/// quiet, it is invisible: the person who wrote the thing lost the same
+/// button twice in one evening, and then lost the histogram because the
+/// name that opens it looked like a filename rather than a control.
+///
+/// The whole grammar is two fills and nothing else. [`palette.raised`] means
+/// this can be clicked; [`palette.line`] means it can be clicked and is
+/// currently on. Nothing clickable is transparent any more, and the pointer
+/// confirms on hover.
+///
+/// [`palette.raised`]: Palette::raised
+/// [`palette.line`]: Palette::line
 fn quiet_button(ui: &mut egui::Ui, palette: &Palette, text: &str, hint: &str) -> bool {
     ui.add(
-        egui::Button::new(RichText::new(text).size(11.0).color(palette.muted))
-            .fill(Color32::TRANSPARENT),
+        egui::Button::new(RichText::new(text).size(11.0).color(palette.muted)).fill(palette.raised),
     )
+    .on_hover_cursor(CursorIcon::PointingHand)
     .on_hover_text(hint)
     .clicked()
 }
