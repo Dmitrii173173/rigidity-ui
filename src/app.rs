@@ -1762,8 +1762,20 @@ impl App {
                 let controls = header.inner;
                 let draggable =
                     Rect::from_min_max(row.left_top(), pos2(controls.left(), row.bottom()));
+                // Overlap is shared area, not a shared edge. `intersects`
+                // compares with `<=`, so two rectangles meeting along one line
+                // count as intersecting — and this handle is built to end
+                // exactly at `controls.left()`, so it meets them by
+                // construction and the assertion fired on the first frame of
+                // every debug build. `cargo run` panicked before the window
+                // appeared; the release builds the screenshots come from
+                // compile the assertion out, which is why it went unseen.
+                //
+                // The guard is still worth having: it is what catches the
+                // handle being widened back over the controls, which is the
+                // regression it was written for.
                 debug_assert!(
-                    !draggable.intersects(controls),
+                    !draggable.intersect(controls).is_positive(),
                     "the window drag area covers the header's controls again"
                 );
                 if ui
