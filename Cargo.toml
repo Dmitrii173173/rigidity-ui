@@ -9,7 +9,7 @@ edition      = "2024"
 # produced by the same compiler that produced the ones the CLI prints, or
 # they are not the same numbers.
 rust-version = "1.97"
-# The same dual licence as ../rigidity, and not a choice this crate
+# The same licence as ../rigidity, AGPL-3.0 alone, and not a choice this crate
 # could make on its own: it links those crates directly. See
 # LICENSING.md.
 license      = "AGPL-3.0-only"

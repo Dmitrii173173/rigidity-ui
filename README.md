@@ -292,10 +292,10 @@ carries no weight along the corridor. `PLAN.md` has the whole of it.
 
 ## License
 
-Dual-licensed: **AGPL-3.0-only**, or a commercial licence — the same as
-`rigidity`, and not a separate decision, since this application links those
-crates directly.
+Licensed under **AGPL-3.0-only** and nothing else — the same as `rigidity`,
+and not a separate decision, since this application links those crates
+directly.
 
-Free under the [AGPL](LICENSE) for students, research, personal use and
-evaluation. Closed products and hosted services need the commercial
-licence: [`LICENSING.md`](LICENSING.md).
+Free under the [AGPL](LICENSE) for everyone; a version you distribute or
+host for others has to be published under the AGPL too:
+[`LICENSING.md`](LICENSING.md).
